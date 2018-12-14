@@ -35,9 +35,11 @@ dependencies:
 - mtl
 #- prometheus-client
 #- prometheus-metrics-ghc
+- pantry
 - persistent
 - persistent-template
 - resourcet
+- rio
 - shakespeare
 - tar
 - template-haskell
@@ -96,7 +98,6 @@ default-extensions:
 - QuasiQuotes
 - OverloadedStrings
 - NoImplicitPrelude
-- CPP
 - MultiParamTypeClasses
 - TypeFamilies
 - GADTs

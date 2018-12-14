@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 module Types where
 
 import ClassyPrelude.Yesod

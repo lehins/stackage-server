@@ -86,3 +86,10 @@ instance FromJSON PackageName where
   parseJSON = withText "PackageName" $ pure . mkPackageName . unpack
 instance FromJSONKey PackageName where
   fromJSONKey = FromJSONKeyText $ mkPackageName . unpack
+
+-- data PackageOrigin
+--   = OriginCore
+--   | OriginHackage
+--   | OriginArchive
+--   | OriginGit
+--   | OriginMercurial

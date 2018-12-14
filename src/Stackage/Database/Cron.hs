@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP#-}
+{-# LANGUAGE CPP #-}
 module Stackage.Database.Cron
     ( stackageServerCron
     , newHoogleLocker
@@ -82,7 +82,18 @@ stackageServerCron = do
     void $ catchIO (bindPortTCP 17834 "127.0.0.1") $ \_ ->
         error $ "cabal loader process already running, exiting"
 
+    connstr <- getEnv "PGSTRING"
+
+    let dbfp = PostgresConf
+          { pgPoolSize = 5
+          , pgConnStr = encodeUtf8 $ pack connstr
+          }
+    createStackageDatabase dbfp
+
+
+#if !DEVELOPMENT
     env <- newEnv Discover
+
     let upload :: FilePath -> ObjectKey -> IO ()
         upload fp key = do
             let fpgz = fp <.> "gz"
@@ -100,15 +111,6 @@ stackageServerCron = do
                 Left e -> error $ show (fp, key, e)
                 Right _ -> putStrLn "Success"
 
-    connstr <- getEnv "PGSTRING"
-
-    let dbfp = PostgresConf
-          { pgPoolSize = 5
-          , pgConnStr = encodeUtf8 $ pack connstr
-          }
-    createStackageDatabase dbfp
-
-#if !DEVELOPMENT          
     db <- openStackageDatabase dbfp
 
     do

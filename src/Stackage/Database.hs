@@ -25,6 +25,7 @@ module Stackage.Database
     , getPackageModules
     , SnapshotPackage (..)
     , lookupSnapshotPackage
+    , SnapshotHackagePackage(..)
     , getDeprecated
     , LatestInfo (..)
     , getLatests
@@ -64,18 +65,18 @@ import Stackage.Types
 import Stackage.Metadata
 import Stackage.PackageIndex.Conduit
 import Web.PathPieces (fromPathPiece)
-import Data.Yaml (decodeFileEither, decodeEither)
+import Data.Yaml (decodeFileEither, decodeEither', decodeThrow)
 import Database.Persist
 import Database.Persist.Postgresql
 import Database.Persist.TH
 import Control.Monad.Logger
 import System.IO.Temp
 import qualified Database.Esqueleto as E
-import Data.Yaml (decode)
 import qualified Data.Aeson as A
 import Types (SnapshotBranch(..))
 import Data.Pool (destroyAllResources)
 import Data.List (nub)
+import Pantry.Storage
 
 currentSchema :: Int
 currentSchema = 1
@@ -120,6 +121,11 @@ SnapshotPackage
     isCore Bool
     version Text
     UniqueSnapshotPackage snapshot package
+SnapshotHackagePackage
+    snapshot SnapshotId
+    cabal HackageCabalId
+    package HackageTarballId
+    UniqueSnapshotHackagePackage snapshot package
 Module
     package SnapshotPackageId
     name Text
@@ -135,6 +141,8 @@ Deprecated
     UniqueDeprecated package
 |]
 
+
+
 instance A.ToJSON Snapshot where
   toJSON Snapshot{..} =
     A.object [ "name"    A..= snapshotName
@@ -144,6 +152,7 @@ instance A.ToJSON Snapshot where
 
 _hideUnusedWarnings
     :: ( SnapshotPackageId
+       , SnapshotHackagePackageId
        , SchemaId
        , ImportedId
        , LtsId
@@ -284,7 +293,7 @@ getDeprecated' :: [Deprecation] -> Tar.Entry -> [Deprecation]
 getDeprecated' orig e =
     case (Tar.entryPath e, Tar.entryContent e) of
         ("deprecated.yaml", Tar.NormalFile lbs _) ->
-            case decode $ toStrict lbs of
+            case decodeThrow $ toStrict lbs of
                 Just x -> x
                 Nothing -> orig
         _ -> orig
@@ -316,7 +325,7 @@ addPackage :: Tar.Entry -> SqlPersistT (ResourceT IO) ()
 addPackage e =
     case ("packages/" `isPrefixOf` fp && takeExtension fp == ".yaml", Tar.entryContent e) of
         (True, Tar.NormalFile lbs _) ->
-          case decodeEither $ toStrict lbs of
+          case decodeEither' $ toStrict lbs of
             Left err -> putStrLn $ "ERROR: Could not parse " ++ tshow fp ++ ": " ++ tshow err
             Right pi -> onParse pi
         _ -> return ()
