@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -- | Lists the package page similar to Hackage.
 
@@ -30,9 +30,9 @@ getPackageR = track "Handler.Package.getPackageR" . packagePage Nothing
 getPackageBadgeR :: PackageName -> SnapshotBranch -> Handler TypedContent
 getPackageBadgeR pname branch = track "Handler.Package.getPackageBadgeR" $ do
     cacheSeconds (3 * 60 * 60)
-    snapName     <- maybe notFound pure =<< newestSnapshot branch
-    Entity sid _ <- maybe notFound pure =<< lookupSnapshot snapName
-    mVersion <- do mSnapPackage <- lookupSnapshotPackage sid (unPackageName pname)
+    snapName     <- maybe notFound pure =<< inRIO (newestSnapshot branch)
+    Entity sid _ <- maybe notFound pure =<< inRIO (lookupSnapshot snapName)
+    mVersion <- do mSnapPackage <- inRIO $ lookupSnapshotPackage sid (unPackageName pname)
                    pure (Version . snapshotPackageVersion . entityVal <$> mSnapPackage)
 
     mLabel <- lookupGetParam "label"
@@ -72,22 +72,22 @@ packagePage :: Maybe (SnapName, Version)
             -> Handler Html
 packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pname $ do
     let pname' = toPathPiece pname
-    (deprecated, inFavourOf) <- getDeprecated pname'
-    latests <- getLatests pname'
-    deps' <- getDeps pname' $ Just maxDisplayedDeps
-    revdeps' <- getRevDeps pname' $ Just maxDisplayedDeps
-    (depsCount, revdepsCount) <- getDepsCount pname'
-    Entity _ package <- getPackage pname' >>= maybe notFound return
+    (deprecated, inFavourOf) <- inRIO $ getDeprecated pname'
+    latests <- inRIO $ getLatests pname'
+    deps' <- inRIO $ getDeps pname' $ Just maxDisplayedDeps
+    revdeps' <- inRIO $ getRevDeps pname' $ Just maxDisplayedDeps
+    (depsCount, revdepsCount) <- inRIO $ getDepsCount pname'
+    Entity _ package <- inRIO (getPackage pname') >>= maybe notFound return
 
     mdocs <-
         case mversion of
             Just (sname, version) -> do
-                ms <- getPackageModules sname pname'
+                ms <- inRIO $ getPackageModules sname pname'
                 return $ Just (sname, toPathPiece version, ms)
             Nothing ->
                 case latests of
                     li:_ -> do
-                        ms <- getPackageModules (liSnapName li) pname'
+                        ms <- inRIO $ getPackageModules (liSnapName li) pname'
                         return $ Just (liSnapName li, liVersion li, ms)
                     [] -> return Nothing
 
@@ -248,7 +248,7 @@ renderEmail = T.decodeUtf8 . toByteString
 
 getPackageSnapshotsR :: PackageName -> Handler Html
 getPackageSnapshotsR pn = track "Handler.Package.getPackageSnapshotsR" $
-  do snapshots <- getSnapshotsForPackage $ toPathPiece pn
+  do snapshots <- inRIO $ getSnapshotsForPackage $ toPathPiece pn
      defaultLayout
        (do setTitle ("Packages for " >> toHtml pn)
            $(combineStylesheets 'StaticR

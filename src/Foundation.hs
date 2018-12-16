@@ -164,3 +164,8 @@ instance RenderMessage App FormMessage where
 
 instance HasStorage App where
     storageG = to appStackageDatabase
+
+instance GetStackageDatabase App Handler where
+    getStackageDatabase = appStackageDatabase <$> getYesod
+instance GetStackageDatabase App (WidgetFor App) where
+    getStackageDatabase = appStackageDatabase <$> getYesod

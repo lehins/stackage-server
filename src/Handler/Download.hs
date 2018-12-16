@@ -22,8 +22,8 @@ getDownloadSnapshotsJsonR = track "Hoogle.Download.getDownloadSnapshotsJsonR"
     getDownloadLtsSnapshotsJsonR
 
 getDownloadLtsSnapshotsJsonR :: Handler Value
-getDownloadLtsSnapshotsJsonR = track "Hoogle.Download.getDownloadLtsSnapshotsJsonR"
-    snapshotsJSON
+getDownloadLtsSnapshotsJsonR = track "Hoogle.Download.getDownloadLtsSnapshotsJsonR" $
+    inRIO snapshotsJSON
 
 -- Print the ghc major version for the given snapshot.
 ghcMajorVersionText :: Snapshot -> Text
@@ -35,7 +35,7 @@ ghcMajorVersionText =
 
 getGhcMajorVersionR :: SnapName -> Handler Text
 getGhcMajorVersionR name = track "Hoogle.Download.getGhcMajorVersionR" $ do
-    snapshot <- lookupSnapshot name >>= maybe notFound return
+    snapshot <- inRIO (lookupSnapshot name) >>= maybe notFound return
     return $ ghcMajorVersionText $ entityVal snapshot
 
 getDownloadGhcLinksR :: SupportedArch -> Text -> Handler TypedContent

@@ -35,7 +35,7 @@ data DepType = Deps | Revdeps
 
 helper :: DepType -> Maybe (SnapName, Version) -> PackageName -> Handler Html
 helper depType mversion pname = track "Handler.PackageDeps.helper" $ do
-  deps <-
+  deps <- inRIO $
     (case depType of
        Deps -> getDeps
        Revdeps -> getRevDeps) (toPathPiece pname) Nothing

@@ -33,18 +33,18 @@ getOldSnapshotBranchR LtsBranch pieces = track "Handler.OldLinks.getOldSnapshotB
         t:ts | Just suffix <- parseLtsSuffix t -> do
             (x, y) <- case suffix of
                 LSMajor x -> do
-                    y <- newestLTSMajor x >>= maybe notFound return
+                    y <- inRIO (newestLTSMajor x) >>= maybe notFound return
                     return (x, y)
                 LSMinor x y -> return (x, y)
             return (x, y, ts)
         _ -> do
-            (x, y) <- newestLTS >>= maybe notFound return
+            (x, y) <- inRIO newestLTS >>= maybe notFound return
             return (x, y, pieces)
     let name = concat ["lts-", tshow x, ".", tshow y]
     redirectWithQueryText $ concatMap (cons '/') $ name : pieces'
 
 getOldSnapshotBranchR (LtsMajorBranch x) pieces = track "Handler.OldLinks.getOldSnapshotBranchR@LtsMajorBranch" $ do
-    y <- newestLTSMajor x >>= maybe notFound return
+    y <- inRIO (newestLTSMajor x) >>= maybe notFound return
     let name = concat ["lts-", tshow x, ".", tshow y]
     redirectWithQueryText $ concatMap (cons '/') $ name : pieces
 
@@ -52,7 +52,7 @@ getOldSnapshotBranchR NightlyBranch pieces = track "Handler.OldLinks.getOldSnaps
     (day, pieces') <- case pieces of
         t:ts | Just day <- fromPathPiece t -> return (day, ts)
         _ -> do
-            day <- newestNightly >>= maybe notFound return
+            day <- inRIO newestNightly >>= maybe notFound return
             return (day, pieces)
     let name = "nightly-" ++ tshow day
     redirectWithQueryText $ concatMap (cons '/') $ name : pieces'

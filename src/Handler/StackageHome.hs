@@ -16,15 +16,15 @@ import Stackage.Snapshot.Diff
 
 getStackageHomeR :: SnapName -> Handler TypedContent
 getStackageHomeR name = track "Handler.StackageHome.getStackageHomeR" $ do
-    Entity sid snapshot <- runInRIO $ lookupSnapshot name >>= maybe notFound return
-    previousSnapName <- fromMaybe name . map snd <$> runInRIO (snapshotBefore (snapshotName snapshot))
+    Entity sid snapshot <- inRIO (lookupSnapshot name) >>= maybe notFound return
+    previousSnapName <- fromMaybe name . map snd <$> inRIO (snapshotBefore (snapshotName snapshot))
     let hoogleForm =
             let queryText = "" :: Text
                 exact = False
                 mPackageName = Nothing :: Maybe Text
             in $(widgetFile "hoogle-form")
-    packageCount <- runInRIO $ getPackageCount sid
-    packages <- runInRIO $ getPackages sid
+    packageCount <- inRIO $ getPackageCount sid
+    packages <- inRIO $ getPackages sid
     selectRep $ do
       provideRep $ do
         defaultLayout $ do
@@ -46,11 +46,11 @@ instance ToJSON SnapshotInfo where
 
 getStackageDiffR :: SnapName -> SnapName -> Handler TypedContent
 getStackageDiffR name1 name2 = track "Handler.StackageHome.getStackageDiffR" $ do
-    Entity sid1 _ <- runInRIO $ lookupSnapshot name1 >>= maybe notFound return
-    Entity sid2 _ <- runInRIO $ lookupSnapshot name2 >>= maybe notFound return
-    (map (snapshotName . entityVal) -> snapNames) <- runInRIO $ getSnapshots Nothing 0 0
+    Entity sid1 _ <- inRIO (lookupSnapshot name1) >>= maybe notFound return
+    Entity sid2 _ <- inRIO (lookupSnapshot name2) >>= maybe notFound return
+    (map (snapshotName . entityVal) -> snapNames) <- inRIO $ getSnapshots Nothing 0 0
     let (ltsSnaps, nightlySnaps) = partition isLts $ reverse $ sort snapNames
-    snapDiff <- runInRIO $ getSnapshotDiff sid1 sid2
+    snapDiff <- inRIO $ getSnapshotDiff sid1 sid2
     selectRep $ do
         provideRep $ defaultLayout $ do
             setTitle $ "Compare " ++ toHtml (toPathPiece name1) ++ " with "
@@ -60,7 +60,7 @@ getStackageDiffR name1 name2 = track "Handler.StackageHome.getStackageDiffR" $ d
 
 getStackageCabalConfigR :: SnapName -> Handler TypedContent
 getStackageCabalConfigR name = track "Handler.StackageHome.getStackageCabalConfigR" $ do
-    Entity sid _ <- lookupSnapshot name >>= maybe notFound return
+    Entity sid _ <- inRIO (lookupSnapshot name) >>= maybe notFound return
     render <- getUrlRender
 
     mdownload <- lookupGetParam "download"
@@ -70,7 +70,7 @@ getStackageCabalConfigR name = track "Handler.StackageHome.getStackageCabalConfi
     mglobal <- lookupGetParam "global"
     let isGlobal = mglobal == Just "true"
 
-    plis <- getPackages sid
+    plis <- inRIO $ getPackages sid
 
     respondSource typePlain $ yieldMany plis .|
         if isGlobal
@@ -151,8 +151,8 @@ getSnapshotPackagesR name = track "Handler.StackageHome.getSnapshotPackagesR" $
 
 getDocsR :: SnapName -> Handler Html
 getDocsR name = track "Handler.StackageHome.getDocsR" $ do
-    Entity sid _ <- lookupSnapshot name >>= maybe notFound return
-    mlis <- getSnapshotModules sid
+    Entity sid _ <- inRIO (lookupSnapshot name) >>= maybe notFound return
+    mlis <- inRIO $ getSnapshotModules sid
     render <- getUrlRender
     let mliUrl mli = render $ haddockUrl name (mliPackageVersion mli) (mliName mli)
     defaultLayout $ do

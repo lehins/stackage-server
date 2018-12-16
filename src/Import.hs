@@ -20,8 +20,8 @@ import Stackage.Database (SnapName)
 import Formatting (format)
 import Formatting.Time (diff)
 
-runInRIO :: MonadHandler m => RIO (HandlerSite m) b -> m b
-runInRIO f = do
+inRIO :: MonadHandler m => RIO (HandlerSite m) b -> m b
+inRIO f = do
   site <- getYesod
   runRIO site f
 

@@ -5,7 +5,8 @@ module Stackage.Database
     , HasStorage(..)
     , SnapName (..)
     , SnapshotId ()
-    , Snapshot (..)
+    , StackageDatabase
+    , GetStackageDatabase(..)
     , closeStackageDatabase
     , newestSnapshot
     , newestLTS
@@ -174,10 +175,20 @@ _hideUnusedWarnings
        ) -> ()
 _hideUnusedWarnings _ = ()
 
+
 closeStackageDatabase :: HasStorage env => RIO env ()
 closeStackageDatabase = do
     Storage pool <- view storageG
     liftIO $ destroyAllResources pool
+
+type StackageDatabase = Storage
+
+class (HasStorage env, MonadIO m) => GetStackageDatabase env m | m -> env where
+    getStackageDatabase :: m Storage
+instance (HasStorage env, MonadIO m) => GetStackageDatabase env (ReaderT env m) where
+    getStackageDatabase = view storageG
+instance HasStorage env => GetStackageDatabase env (RIO env) where
+    getStackageDatabase = view storageG
 
 sourcePackages :: MonadResource m => FilePath -> ConduitT i Tar.Entry m ()
 sourcePackages root = do

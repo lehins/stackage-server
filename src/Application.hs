@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE CPP#-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 module Application
     ( getApplicationDev
     , appMain
@@ -13,6 +14,7 @@ module Application
     , handler
     ) where
 
+import           RIO (LogFunc, newLogFunc, withLogFunc, logOptionsHandle, LogOptions)
 import Control.Monad.Logger                 (liftLoc)
 import Language.Haskell.TH.Syntax           (qLocation)
 import           Control.Concurrent (forkIO)
@@ -104,8 +106,8 @@ forceSSL' settings app
 
 -- | Loads up any necessary settings, creates your foundation datatype, and
 -- performs some initialization.
-makeFoundation :: AppSettings -> IO App
-makeFoundation appSettings = do
+makeFoundation :: LogFunc -> AppSettings -> IO App
+makeFoundation logFunc appSettings = do
     -- Some basic initializations: HTTP connection manager, logger, and static
     -- subsite.
     appHttpManager <- newManager
@@ -145,11 +147,15 @@ makeFoundation appSettings = do
     appHoogleLock <- newMVar ()
 
     appMirrorStatus <- mkUpdateMirrorStatus
-    hoogleLocker <- newHoogleLocker True appHttpManager
+    hoogleLocker <- newHoogleLocker logFunc appHttpManager
     let appGetHoogleDB = singleRun hoogleLocker
     let appGitRev = $$tGitRev
 
     return App {..}
+
+getLogOpts :: AppSettings -> IO LogOptions
+getLogOpts settings = logOptionsHandle stdout (appShouldLogAll settings)
+
 
 makeLogWare :: App -> IO Middleware
 makeLogWare foundation =
@@ -184,7 +190,10 @@ warpSettings foundation =
 getApplicationDev :: IO (Settings, Application)
 getApplicationDev = do
     settings <- getAppSettings
-    foundation <- makeFoundation settings
+    logOpts <- getLogOpts settings
+    -- FIXME: finalizer is discarded. Could be OK for ghci and development?
+    (logFunc, _ :: IO ()) <- newLogFunc logOpts
+    foundation <- makeFoundation logFunc settings
     wsettings <- getDevSettings $ warpSettings foundation
     app <- makeApplication foundation
     return (wsettings, app)
@@ -206,15 +215,16 @@ appMain = do
 
         -- allow environment variables to override
         useEnv
+    logOpts <- getLogOpts settings
+    withLogFunc logOpts $ \ logFunc -> do
+        -- Generate the foundation from the settings
+        foundation <- makeFoundation logFunc settings
 
-    -- Generate the foundation from the settings
-    foundation <- makeFoundation settings
+        -- Generate a WAI Application from the foundation
+        app <- makeApplication foundation
 
-    -- Generate a WAI Application from the foundation
-    app <- makeApplication foundation
-
-    -- Run the application with Warp
-    runSettings (warpSettings foundation) app
+        -- Run the application with Warp
+        runSettings (warpSettings foundation) app
 
 
 --------------------------------------------------------------
@@ -223,7 +233,10 @@ appMain = do
 getApplicationRepl :: IO (Int, App, Application)
 getApplicationRepl = do
     settings <- getAppSettings
-    foundation <- makeFoundation settings
+    logOpts <- getLogOpts settings
+    -- FIXME: finalizer is discarded. Could be OK for ghci and development?
+    (logFunc, _ :: IO ()) <- newLogFunc logOpts
+    foundation <- makeFoundation logFunc settings
     wsettings <- getDevSettings $ warpSettings foundation
     app1 <- makeApplication foundation
     return (getPort wsettings, foundation, app1)
@@ -238,4 +251,7 @@ shutdownApp _ = return ()
 
 -- | Run a handler
 handler :: Handler a -> IO a
-handler h = getAppSettings >>= makeFoundation >>= flip unsafeHandler h
+handler h = do
+    logOpts <- logOptionsHandle stdout True
+    withLogFunc logOpts $ \ logFunc ->
+        getAppSettings >>= makeFoundation logFunc >>= flip unsafeHandler h

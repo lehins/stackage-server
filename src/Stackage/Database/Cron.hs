@@ -1,9 +1,9 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Database.Cron
-    ( -- stackageServerCron
-     newHoogleLocker
-    -- , singleRun
+    ( stackageServerCron
+    , newHoogleLocker
+    , singleRun
     ) where
 
 import RIO
@@ -12,7 +12,6 @@ import qualified RIO.Map as Map
 import RIO.Directory
 import RIO.FilePath
 import Conduit
---import ClassyPrelude.Conduit
 import Stackage.PackageIndex.Conduit
 import Database.Persist (Entity (Entity))
 import qualified Codec.Archive.Tar as Tar
@@ -63,15 +62,13 @@ withResponseUnliftIO :: MonadUnliftIO m =>
                  Request -> Manager -> (Response BodyReader -> m b) -> m b
 withResponseUnliftIO req man f = withRunInIO $ \ run -> withResponse req man (run . f)
 
-newHoogleLocker :: Bool -- ^ print exceptions?
-                -> Manager
-                -> RIO Stackage (SingleRun SnapName (Maybe FilePath))
-newHoogleLocker toPrint man = do
-  env <- ask
-  mkSingleRun (hoogleLocker env)
+newHoogleLocker ::
+       (HasLogFunc env, MonadIO m) => env -> Manager -> m (SingleRun SnapName (Maybe FilePath))
+newHoogleLocker env man = do
+  mkSingleRun hoogleLocker
   where
-    hoogleLocker :: MonadIO m => Stackage -> SnapName -> m (Maybe FilePath)
-    hoogleLocker env name = runRIO env $ do
+    hoogleLocker :: MonadIO m => SnapName -> m (Maybe FilePath)
+    hoogleLocker name = runRIO env $ do
       let fp = T.unpack $ hoogleKey name
           fptmp = fp <.> "tmp"
       exists <- doesFileExist fp
@@ -92,6 +89,7 @@ newHoogleLocker toPrint man = do
                 -- logDebug
                 return Nothing
 
+initStorage :: IO Storage
 initStorage = do
     connstr <- getEnv "PGSTRING"
 

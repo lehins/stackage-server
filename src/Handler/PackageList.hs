@@ -10,6 +10,6 @@ getPackageListR :: Handler Html
 getPackageListR = track "Handler.PackageList.getPackageListR" $ do
     defaultLayout $ do
         setTitle "Package list"
-        packages <- getAllPackages
+        packages <- inRIO getAllPackages
         $(widgetFile "package-list")
   where strip x = fromMaybe x (stripSuffix "." x)
