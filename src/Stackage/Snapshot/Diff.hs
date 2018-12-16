@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 module Stackage.Snapshot.Diff
   ( getSnapshotDiff
@@ -9,18 +10,19 @@ module Stackage.Snapshot.Diff
   , WithSnapshotNames(..)
   ) where
 
+import           RIO
 import qualified Data.Text as T(commonPrefixes)
 import           Data.Align
 import           Data.Aeson
 import qualified Data.HashMap.Strict as HashMap
 import           Control.Arrow
-import           ClassyPrelude
 import           Data.These
 import           Stackage.Database (SnapshotId, PackageListingInfo(..),
-                                    GetStackageDatabase, getPackages)
+                                    HasStorage, getPackages)
 import           Stackage.Database.Types (SnapName)
 import           Types
 import           Web.PathPieces
+import ClassyPrelude (sortOn, toCaseFold)
 
 data WithSnapshotNames a
     = WithSnapshotNames SnapName SnapName a
@@ -70,7 +72,7 @@ instance ToJSON (WithSnapshotNames VersionChange) where
 changed :: VersionChange -> Bool
 changed = these (const True) (const True) (/=) . unVersionChange
 
-getSnapshotDiff :: GetStackageDatabase m => SnapshotId -> SnapshotId -> m SnapshotDiff
+getSnapshotDiff :: HasStorage env => SnapshotId -> SnapshotId -> RIO env SnapshotDiff
 getSnapshotDiff a b = snapshotDiff <$> getPackages a <*> getPackages b
 
 snapshotDiff :: [PackageListingInfo] -> [PackageListingInfo] -> SnapshotDiff

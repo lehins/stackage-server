@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Handler.StackageHome
     ( getStackageHomeR
     , getStackageDiffR
@@ -15,15 +16,15 @@ import Stackage.Snapshot.Diff
 
 getStackageHomeR :: SnapName -> Handler TypedContent
 getStackageHomeR name = track "Handler.StackageHome.getStackageHomeR" $ do
-    Entity sid snapshot <- lookupSnapshot name >>= maybe notFound return
-    previousSnapName <- fromMaybe name . map snd <$> snapshotBefore (snapshotName snapshot)
+    Entity sid snapshot <- runInRIO $ lookupSnapshot name >>= maybe notFound return
+    previousSnapName <- fromMaybe name . map snd <$> runInRIO (snapshotBefore (snapshotName snapshot))
     let hoogleForm =
             let queryText = "" :: Text
                 exact = False
                 mPackageName = Nothing :: Maybe Text
             in $(widgetFile "hoogle-form")
-    packageCount <- getPackageCount sid
-    packages <- getPackages sid
+    packageCount <- runInRIO $ getPackageCount sid
+    packages <- runInRIO $ getPackages sid
     selectRep $ do
       provideRep $ do
         defaultLayout $ do
@@ -45,11 +46,11 @@ instance ToJSON SnapshotInfo where
 
 getStackageDiffR :: SnapName -> SnapName -> Handler TypedContent
 getStackageDiffR name1 name2 = track "Handler.StackageHome.getStackageDiffR" $ do
-    Entity sid1 _ <- lookupSnapshot name1 >>= maybe notFound return
-    Entity sid2 _ <- lookupSnapshot name2 >>= maybe notFound return
-    (map (snapshotName . entityVal) -> snapNames) <- getSnapshots Nothing 0 0
+    Entity sid1 _ <- runInRIO $ lookupSnapshot name1 >>= maybe notFound return
+    Entity sid2 _ <- runInRIO $ lookupSnapshot name2 >>= maybe notFound return
+    (map (snapshotName . entityVal) -> snapNames) <- runInRIO $ getSnapshots Nothing 0 0
     let (ltsSnaps, nightlySnaps) = partition isLts $ reverse $ sort snapNames
-    snapDiff <- getSnapshotDiff sid1 sid2
+    snapDiff <- runInRIO $ getSnapshotDiff sid1 sid2
     selectRep $ do
         provideRep $ defaultLayout $ do
             setTitle $ "Compare " ++ toHtml (toPathPiece name1) ++ " with "

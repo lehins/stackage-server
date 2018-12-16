@@ -1,5 +1,6 @@
 -- Adopted from https://github.com/haskell/hackage-server/blob/master/Distribution/Server/Packages/ModuleForest.hs
 
+{-# LANGUAGE NoImplicitPrelude #-}
 module Distribution.Package.ModuleForest
     ( moduleName
     , moduleForest

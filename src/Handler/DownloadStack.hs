@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Handler.DownloadStack
     ( getDownloadStackListR
     , getDownloadStackR

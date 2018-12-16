@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Database.Haddock
     ( renderHaddock
     ) where

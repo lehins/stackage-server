@@ -1,5 +1,7 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Foundation where
 
+import           RIO (to)
 import           ClassyPrelude.Yesod
 import           Data.WebsiteContent
 import           Settings
@@ -24,7 +26,7 @@ data App = App
     , appHttpManager :: Manager
     , appLogger :: Logger
     , appWebsiteContent :: GitRepo WebsiteContent
-    , appStackageDatabase :: StackageDatabase
+    , appStackageDatabase :: Storage
     , appLatestStackMatcher :: IO (Text -> Maybe Text)
     -- ^ Give a pattern, get a URL
     , appHoogleLock :: MVar ()
@@ -160,7 +162,5 @@ instance RenderMessage App FormMessage where
 --
 -- https://github.com/yesodweb/yesod/wiki/Sending-email
 
-instance GetStackageDatabase Handler where
-    getStackageDatabase = appStackageDatabase <$> getYesod
-instance GetStackageDatabase (WidgetFor App) where
-    getStackageDatabase = appStackageDatabase <$> getYesod
+instance HasStorage App where
+    storageG = to appStackageDatabase

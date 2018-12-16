@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Data.WebsiteContent
     ( WebsiteContent (..)
     , StackRelease (..)

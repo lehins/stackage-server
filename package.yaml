@@ -36,6 +36,7 @@ dependencies:
 #- prometheus-client
 #- prometheus-metrics-ghc
 - pantry
+- path
 - persistent
 - persistent-template
 - resourcet
@@ -45,6 +46,7 @@ dependencies:
 - template-haskell
 - temporary
 - text
+- transformers
 - these
 - unliftio
 - wai
@@ -97,7 +99,6 @@ default-extensions:
 - TemplateHaskell
 - QuasiQuotes
 - OverloadedStrings
-- NoImplicitPrelude
 - MultiParamTypeClasses
 - TypeFamilies
 - GADTs

@@ -1,13 +1,17 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Import
     ( module Import
     ) where
 
+import RIO (RIO, runRIO)
+import Control.Monad.Trans.Class (lift)
 import ClassyPrelude.Yesod as Import
 import Foundation as Import
 import Settings as Import
 import Settings.StaticFiles as Import
 import Types as Import
 import Yesod.Auth as Import
+import Yesod.Core.Handler (getYesod)
 import Data.WebsiteContent as Import (WebsiteContent (..))
 import Data.Text.Read (decimal)
 import Data.Time.Clock (diffUTCTime)
@@ -15,6 +19,11 @@ import Data.Time.Clock (diffUTCTime)
 import Stackage.Database (SnapName)
 import Formatting (format)
 import Formatting.Time (diff)
+
+runInRIO :: MonadHandler m => RIO (HandlerSite m) b -> m b
+runInRIO f = do
+  site <- getYesod
+  runRIO site f
 
 parseLtsPair :: Text -> Maybe (Int, Int)
 parseLtsPair t1 = do

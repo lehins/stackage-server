@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Types
   ( BuildPlan (..)
   , SystemInfo (..)
@@ -7,7 +8,7 @@ module Stackage.Types
   , PackageDocs (..)
   , PackageName
   , Version
-  , display
+  , dtDisplay
   ) where
 
 import qualified Distribution.Text               as DT
@@ -54,8 +55,8 @@ instance FromJSON PackageDocs where
         <$> o .: "version"
         <*> o .: "modules"
 
-display :: DT.Text a => a -> Text
-display = fromString . DT.display
+dtDisplay :: DT.Text a => a -> Text
+dtDisplay = fromString . DT.display
 
 data ParseFailedException = ParseFailedException TypeRep Text
     deriving (Show, Typeable)

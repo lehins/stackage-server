@@ -7,25 +7,26 @@ module Stackage.PackageIndex.Conduit
     , CabalFileEntry (..)
     ) where
 
-import qualified Codec.Archive.Tar                     as Tar
-import           Codec.Compression.GZip                (decompress)
-import           Control.Monad                         (guard)
-import           Control.Monad.IO.Class                (liftIO)
-import           Control.Monad.Trans.Resource          (MonadResource)
-import qualified Data.ByteString.Lazy                  as L
-import           Data.Conduit                          (ConduitT, bracketP, yield, (.|))
-import qualified Data.Conduit.List                     as CL
-import           Data.Version                          (Version)
-import           Distribution.Compat.ReadP             (readP_to_S)
-import           Distribution.Package                  (PackageName)
-import           Distribution.PackageDescription       (GenericPackageDescription)
+import qualified Codec.Archive.Tar                      as Tar
+import           Codec.Compression.GZip                 (decompress)
+import           Control.Monad                          (guard)
+import           Control.Monad.IO.Class                 (liftIO)
+import           Control.Monad.Trans.Resource           (MonadResource)
+import qualified Data.ByteString.Lazy                   as L
+import           Data.Conduit                           (ConduitT, bracketP,
+                                                         yield, (.|))
+import qualified Data.Conduit.List                      as CL
+import           Data.Version                           (Version)
+import           Distribution.Compat.ReadP              (readP_to_S)
+import           Distribution.Package                   (PackageName)
+import           Distribution.PackageDescription        (GenericPackageDescription)
 import           Distribution.PackageDescription.Parsec (ParseResult, parseGenericPackageDescription)
-import           Distribution.Text                     (disp, parse)
+import           Distribution.Text                      (disp, parse)
 import qualified Distribution.Text
-import           System.IO                             (openBinaryFile)
-import           Text.PrettyPrint                      (render)
-import Prelude
-import UnliftIO
+import           Prelude
+import           System.IO                              (openBinaryFile)
+import           Text.PrettyPrint                       (render)
+import           UnliftIO
 
 sourceTarFile :: MonadResource m
               => Bool -- ^ ungzip?
@@ -39,8 +40,8 @@ sourceTarFile toUngzip fp = do
     ungzip'
         | toUngzip = decompress
         | otherwise = id
-    loop Tar.Done = return ()
-    loop (Tar.Fail e) = throwIO e
+    loop Tar.Done        = return ()
+    loop (Tar.Fail e)    = throwIO e
     loop (Tar.Next e es) = yield e >> loop es
 
 data CabalFileEntry = CabalFileEntry
@@ -82,7 +83,7 @@ parseDistText :: (Monad m, Distribution.Text.Text t) => String -> m t
 parseDistText s =
     case map fst $ filter (null . snd) $ readP_to_S parse s of
         [x] -> return x
-        _ -> fail $ "Could not parse: " ++ s
+        _   -> fail $ "Could not parse: " ++ s
 
 renderDistText :: Distribution.Text.Text t => t -> String
 renderDistText = render . disp

@@ -1,10 +1,11 @@
-{-# LANGUAGE TupleSections, OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 module Handler.Snapshots where
 
 import           Data.Time.Clock
 import           Import
-import Stackage.Database
+import           Stackage.Database
 
 snapshotsPerPage :: Integral a => a
 snapshotsPerPage = 50
@@ -36,9 +37,9 @@ getAllSnapshotsR = track "Handler.Snapshots.getAllSnapshotsR" $ do
         setTitle "Stackage Server"
         let snapshotsNav = $(widgetFile "snapshots-nav")
         $(widgetFile "all-snapshots")
-        
+
       provideRep $ return $ object ["snapshots" .= groups, "totalCount" .= totalCount]
-                
+
   where uncrapify now' snapshot =
             ( snapshotName snapshot
             , snapshotTitle snapshot
