@@ -28,6 +28,6 @@ getStackageSdistR sname (PNVNameVersion pname version) = track "Handler.Stackage
 
 versionHelper :: SnapName -> PackageName -> Handler Version
 versionHelper sname pname = do
-    Entity sid _ <- inRIO (lookupSnapshot sname) >>= maybe notFound return
-    Entity _ sp <- inRIO (lookupSnapshotPackage sid (toPathPiece pname)) >>= maybe notFound return
+    Entity sid _ <- lookupSnapshot sname >>= maybe notFound return
+    Entity _ sp <- lookupSnapshotPackage sid (toPathPiece pname) >>= maybe notFound return
     maybe notFound return $ fromPathPiece $ snapshotPackageVersion sp

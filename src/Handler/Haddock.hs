@@ -90,12 +90,12 @@ checkNeedle needle bs0 =
       | otherwise = CNNotFound
 
 redirectWithVersion ::
-       (MonadHandler m, HasStorage (HandlerSite m)) => SnapName -> [Text] -> m (Maybe (Route App))
+       (GetStackageDatabase env m, MonadHandler m) => SnapName -> [Text] -> m (Maybe (Route App))
 redirectWithVersion slug rest =
     case rest of
         [pkg,file] -> do
-            Entity sid _ <- inRIO (lookupSnapshot slug) >>= maybe notFound return
-            mversion <- inRIO $ getPackageVersionBySnapshot sid pkg
+            Entity sid _ <- lookupSnapshot slug >>= maybe notFound return
+            mversion <- getPackageVersionBySnapshot sid pkg
             case mversion of
                 Nothing -> return Nothing -- error "That package is not part of this snapshot."
                 Just version -> do
@@ -105,7 +105,7 @@ redirectWithVersion slug rest =
 getHaddockBackupR :: [Text] -> Handler ()
 getHaddockBackupR (snap':rest)
   | Just branch <- fromPathPiece snap' = track "Handler.Haddock.getHaddockBackupR" $ do
-      snapName <- inRIO (newestSnapshot branch) >>= maybe notFound pure
+      snapName <- newestSnapshot branch >>= maybe notFound pure
       redirect $ HaddockR snapName rest
 getHaddockBackupR rest = track "Handler.Haddock.getHaddockBackupR" $  redirect $ concat
     $ "https://s3.amazonaws.com/haddock.stackage.org"

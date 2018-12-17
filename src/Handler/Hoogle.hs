@@ -20,7 +20,7 @@ getHoogleDB name = track "Handler.Hoogle.getHoogleDB" $ do
 
 getHoogleR :: SnapName -> Handler Html
 getHoogleR name = track "Handler.Hoogle.getHoogleR" $ do
-    Entity _ snapshot <- inRIO (lookupSnapshot name) >>= maybe notFound return
+    Entity _ snapshot <- lookupSnapshot name >>= maybe notFound return
     mquery <- lookupGetParam "q"
     mPackageName <- lookupGetParam "package"
     mpage <- lookupGetParam "page"

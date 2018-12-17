@@ -17,7 +17,7 @@ getBranchFeedR :: SnapshotBranch -> Handler TypedContent
 getBranchFeedR = track "Handler.Feed.getBranchFeedR" . getBranchFeed . Just
 
 getBranchFeed :: Maybe SnapshotBranch -> Handler TypedContent
-getBranchFeed mBranch = mkFeed mBranch =<< inRIO (getSnapshots mBranch 20 0)
+getBranchFeed mBranch = mkFeed mBranch =<< getSnapshots mBranch 20 0
 
 mkFeed :: Maybe SnapshotBranch -> [Entity Snapshot] -> Handler TypedContent
 mkFeed _ [] = notFound
@@ -54,11 +54,11 @@ mkFeed mBranch snaps = do
 
 getContent :: SnapshotId -> Snapshot -> Handler Html
 getContent sid2 snap = do
-    mprev <- inRIO $ snapshotBefore $ snapshotName snap
+    mprev <- snapshotBefore $ snapshotName snap
     case mprev of
         Nothing -> return "No previous snapshot found for comparison"
         Just (sid1, name1) -> do
-            snapDiff <- inRIO $ getSnapshotDiff sid1 sid2
+            snapDiff <- getSnapshotDiff sid1 sid2
             let name2 = snapshotName snap
             withUrlRenderer
                 [hamlet|

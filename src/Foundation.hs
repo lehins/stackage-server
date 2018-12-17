@@ -26,7 +26,7 @@ data App = App
     , appHttpManager :: Manager
     , appLogger :: Logger
     , appWebsiteContent :: GitRepo WebsiteContent
-    , appStackageDatabase :: Storage
+    , appStackageDatabase :: StackageDatabase
     , appLatestStackMatcher :: IO (Text -> Maybe Text)
     -- ^ Give a pattern, get a URL
     , appHoogleLock :: MVar ()

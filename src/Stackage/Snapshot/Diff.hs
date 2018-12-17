@@ -18,7 +18,7 @@ import qualified Data.HashMap.Strict as HashMap
 import           Control.Arrow
 import           Data.These
 import           Stackage.Database (SnapshotId, PackageListingInfo(..),
-                                    HasStorage, getPackages)
+                                    GetStackageDatabase, getPackages)
 import           Stackage.Database.Types (SnapName)
 import           Types
 import           Web.PathPieces
@@ -72,7 +72,7 @@ instance ToJSON (WithSnapshotNames VersionChange) where
 changed :: VersionChange -> Bool
 changed = these (const True) (const True) (/=) . unVersionChange
 
-getSnapshotDiff :: HasStorage env => SnapshotId -> SnapshotId -> RIO env SnapshotDiff
+getSnapshotDiff :: GetStackageDatabase env m => SnapshotId -> SnapshotId -> m SnapshotDiff
 getSnapshotDiff a b = snapshotDiff <$> getPackages a <*> getPackages b
 
 snapshotDiff :: [PackageListingInfo] -> [PackageListingInfo] -> SnapshotDiff

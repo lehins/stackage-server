@@ -23,9 +23,9 @@ getAllSnapshotsR = track "Handler.Snapshots.getAllSnapshotsR" $ do
     currentPageMay <- lookupGetParam "page"
     let currentPage :: Int
         currentPage = fromMaybe 1 (currentPageMay >>= readMay)
-    totalCount <- inRIO $ countSnapshots Nothing
+    totalCount <- countSnapshots Nothing
     (map entityVal -> snapshots) <-
-        inRIO $ getSnapshots Nothing snapshotsPerPage
+        getSnapshots Nothing snapshotsPerPage
                              ((fromIntegral currentPage - 1) * snapshotsPerPage)
     let groups = groupUp now' snapshots
 

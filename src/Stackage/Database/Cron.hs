@@ -89,7 +89,7 @@ newHoogleLocker env man = do
                 -- logDebug
                 return Nothing
 
-initStorage :: IO Storage
+initStorage :: IO StackageDatabase
 initStorage = do
     connstr <- getEnv "PGSTRING"
 

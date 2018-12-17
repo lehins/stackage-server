@@ -27,10 +27,10 @@ getHomeR = track "Handler.Snapshots.getAllSnapshotsR" $ do
     let currentPage :: Int
         currentPage = fromMaybe 1 (currentPageMay >>= readMay)
     (map entityVal -> snapshots) <-
-        inRIO $ getSnapshots Nothing snapshotsPerPage
+        getSnapshots Nothing snapshotsPerPage
                              ((fromIntegral currentPage - 1) * snapshotsPerPage)
     let groups = groupUp now' snapshots
-    latestLtsByGhc <- inRIO getLatestLtsByGhc
+    latestLtsByGhc <- getLatestLtsByGhc
     defaultLayout $ do
         setTitle "Stackage Server"
         $(widgetFile "home")

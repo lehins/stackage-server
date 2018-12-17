@@ -1,10 +1,10 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Database
     ( PostgresConf (..)
-    , Storage
     , HasStorage(..)
     , SnapName (..)
     , SnapshotId ()
+    , Snapshot(..)
     , StackageDatabase
     , GetStackageDatabase(..)
     , closeStackageDatabase
@@ -64,7 +64,6 @@ import Database.Esqueleto.Internal.Language (From)
 import CMarkGFM
 import Stackage.Database.Haddock
 import System.FilePath (takeBaseName, takeExtension)
---import ClassyPrelude.Conduit hiding (pi)
 import Text.Blaze.Html (Html, toHtml, preEscapedToHtml)
 import Yesod.Form.Fields (Textarea (..))
 import Stackage.Database.Types
@@ -86,7 +85,8 @@ import Types (SnapshotBranch(..))
 import Data.Pool (destroyAllResources)
 import Data.List as L (isPrefixOf, nub)
 import Pantry.Types (Storage(Storage), HasStorage(storageG), HasPantryConfig)
-import Pantry.Storage
+import Pantry.Storage hiding (migrateAll)
+import qualified Pantry.Storage as Pantry (migrateAll)
 import Pantry.Hackage (updateHackageIndex, DidUpdateOccur(..))
 import Control.Monad.Trans.Class (lift)
 
@@ -265,9 +265,10 @@ createStackageDatabase = do
           displayShow (actualSchema, currentSchema)
 
     withStorage $ do
+        runMigration Pantry.migrateAll
         runMigration migrateAll
         unless schemaMatch $ insert_ $ Schema currentSchema
-    didUpdate <- updateHackageIndex (Just "Stackage Server cron job")
+    didUpdate <- updateHackageIndex True (Just "Stackage Server cron job")
     case didUpdate of
       UpdateOccurred -> logInfo "Updated hackage index"
       NoUpdateOccurred -> logInfo "No new packages in hackage index"
@@ -465,24 +466,30 @@ addDocMap name dm = do
       xs -> lift $ logError $ "Impossible happened: unique key constraint failure: " <> displayShow xs
 
 
-newestSnapshot :: HasStorage env => SnapshotBranch -> RIO env (Maybe SnapName)
+run :: GetStackageDatabase env m => SqlPersistT IO a -> m a
+run inner = do
+    Storage pool <- getStackageDatabase
+    liftIO $ runSqlPool inner pool
+
+
+newestSnapshot :: GetStackageDatabase env m => SnapshotBranch -> m (Maybe SnapName)
 newestSnapshot LtsBranch = fmap (uncurry SNLts) <$> newestLTS
 newestSnapshot NightlyBranch = fmap SNNightly <$> newestNightly
 newestSnapshot (LtsMajorBranch x) = fmap (SNLts x) <$> newestLTSMajor x
 
-newestLTS :: HasStorage env => RIO env (Maybe (Int, Int))
+newestLTS :: GetStackageDatabase env m => m (Maybe (Int, Int))
 newestLTS =
-    withStorage $ liftM (fmap go) $ selectFirst [] [Desc LtsMajor, Desc LtsMinor]
+    run $ liftM (fmap go) $ selectFirst [] [Desc LtsMajor, Desc LtsMinor]
   where
     go (Entity _ lts) = (ltsMajor lts, ltsMinor lts)
 
-newestLTSMajor :: HasStorage env => Int -> RIO env (Maybe Int)
+newestLTSMajor :: GetStackageDatabase env m => Int -> m (Maybe Int)
 newestLTSMajor x =
-    withStorage $ liftM (fmap $ ltsMinor . entityVal) $ selectFirst [LtsMajor ==. x] [Desc LtsMinor]
+    run $ liftM (fmap $ ltsMinor . entityVal) $ selectFirst [LtsMajor ==. x] [Desc LtsMinor]
 
-ltsMajorVersions :: HasStorage env => RIO env [(Int, Int)]
+ltsMajorVersions :: GetStackageDatabase env m => m [(Int, Int)]
 ltsMajorVersions =
-    withStorage $ liftM (dropOldMinors . map (toPair . entityVal))
+    run $ liftM (dropOldMinors . map (toPair . entityVal))
         $ selectList [] [Desc LtsMajor, Desc LtsMinor]
   where
     toPair (Lts _ x y) = (x, y)
@@ -493,24 +500,24 @@ ltsMajorVersions =
       where
         sameMinor (y, _) = x == y
 
-newestNightly :: HasStorage env => RIO env (Maybe Day)
+newestNightly :: GetStackageDatabase env m => m (Maybe Day)
 newestNightly =
-    withStorage $ liftM (fmap $ nightlyDay . entityVal) $ selectFirst [] [Desc NightlyDay]
+    run $ liftM (fmap $ nightlyDay . entityVal) $ selectFirst [] [Desc NightlyDay]
 
 -- | Get the snapshot which precedes the given one with respect to it's branch (nightly/lts)
-snapshotBefore :: HasStorage env => SnapName -> RIO env (Maybe (SnapshotId, SnapName))
+snapshotBefore :: GetStackageDatabase env m => SnapName -> m (Maybe (SnapshotId, SnapName))
 snapshotBefore (SNLts x y)     = ltsBefore x y
 snapshotBefore (SNNightly day) = nightlyBefore day
 
-nightlyBefore :: HasStorage env => Day -> RIO env (Maybe (SnapshotId, SnapName))
+nightlyBefore :: GetStackageDatabase env m => Day -> m (Maybe (SnapshotId, SnapName))
 nightlyBefore day = do
-    withStorage $ liftM (fmap go) $ selectFirst [NightlyDay <. day] [Desc NightlyDay]
+    run $ liftM (fmap go) $ selectFirst [NightlyDay <. day] [Desc NightlyDay]
   where
     go (Entity _ nightly) = (nightlySnap nightly, SNNightly $ nightlyDay nightly)
 
-ltsBefore :: HasStorage env => Int -> Int -> RIO env (Maybe (SnapshotId, SnapName))
+ltsBefore :: GetStackageDatabase env m => Int -> Int -> m (Maybe (SnapshotId, SnapName))
 ltsBefore x y = do
-    withStorage $ liftM (fmap go) $ selectFirst
+    run $ liftM (fmap go) $ selectFirst
         ( [LtsMajor <=. x, LtsMinor <. y] ||.
           [LtsMajor <. x]
         )
@@ -518,8 +525,8 @@ ltsBefore x y = do
   where
     go (Entity _ lts) = (ltsSnap lts, SNLts (ltsMajor lts) (ltsMinor lts))
 
-lookupSnapshot :: HasStorage env => SnapName -> RIO env (Maybe (Entity Snapshot))
-lookupSnapshot name = withStorage $ getBy $ UniqueSnapshot name
+lookupSnapshot :: GetStackageDatabase env m => SnapName -> m (Maybe (Entity Snapshot))
+lookupSnapshot name = run $ getBy $ UniqueSnapshot name
 
 snapshotTitle :: Snapshot -> Text
 snapshotTitle s = prettyName (snapshotName s) (snapshotGhc s)
@@ -533,8 +540,8 @@ prettyNameShort name =
         SNLts x y -> T.concat ["LTS Haskell ", T.pack (show x), ".", T.pack (show y)]
         SNNightly d -> "Stackage Nightly " <> T.pack (show d)
 
-getAllPackages :: HasStorage env => RIO env [(Text, Text, Text)] -- FIXME add information on whether included in LTS and Nightly
-getAllPackages = liftM (map toPair) $ withStorage $ do
+getAllPackages :: GetStackageDatabase env m => m [(Text, Text, Text)] -- FIXME add information on whether included in LTS and Nightly
+getAllPackages = liftM (map toPair) $ run $ do
     E.select $ E.from $ \p -> do
         E.orderBy [E.asc $ E.lower_ $ p E.^. PackageName]
         return
@@ -560,8 +567,8 @@ instance A.ToJSON PackageListingInfo where
                 , "isCore"   A..= pliIsCore
                 ]
 
-getPackages :: HasStorage env => SnapshotId -> RIO env [PackageListingInfo]
-getPackages sid = liftM (map toPLI) $ withStorage $ do
+getPackages :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
+getPackages sid = liftM (map toPLI) $ run $ do
     E.select $ E.from $ \(p,sp) -> do
         E.where_ $
             (p E.^. PackageId E.==. sp E.^. SnapshotPackagePackage) E.&&.
@@ -582,9 +589,9 @@ getPackages sid = liftM (map toPLI) $ withStorage $ do
         }
 
 getPackageVersionBySnapshot
-  :: HasStorage env
-  => SnapshotId -> Text -> RIO env (Maybe Text)
-getPackageVersionBySnapshot sid name = liftM (listToMaybe . map toPLI) $ withStorage $ do
+  :: GetStackageDatabase env m
+  => SnapshotId -> Text -> m (Maybe Text)
+getPackageVersionBySnapshot sid name = liftM (listToMaybe . map toPLI) $ run $ do
     E.select $ E.from $ \(p,sp) -> do
         E.where_ $
             (p E.^. PackageId E.==. sp E.^. SnapshotPackagePackage) E.&&.
@@ -603,10 +610,10 @@ data ModuleListingInfo = ModuleListingInfo
     }
 
 getSnapshotModules
-    :: HasStorage env
+    :: GetStackageDatabase env m
     => SnapshotId
-    -> RIO env [ModuleListingInfo]
-getSnapshotModules sid = liftM (map toMLI) $ withStorage $ do
+    -> m [ModuleListingInfo]
+getSnapshotModules sid = liftM (map toMLI) $ run $ do
     E.select $ E.from $ \(p,sp,m) -> do
         E.where_ $
             (p E.^. PackageId E.==. sp E.^. SnapshotPackagePackage) E.&&.
@@ -628,11 +635,11 @@ getSnapshotModules sid = liftM (map toMLI) $ withStorage $ do
         }
 
 getPackageModules
-    :: HasStorage env
+    :: GetStackageDatabase env m
     => SnapName
     -> Text
-    -> RIO env [Text]
-getPackageModules sname pname = withStorage $ do
+    -> m [Text]
+getPackageModules sname pname = run $ do
     sids <- selectKeysList [SnapshotName ==. sname] []
     pids <- selectKeysList [PackageName ==. pname] []
     case (,) <$> listToMaybe sids <*> listToMaybe pids of
@@ -648,18 +655,18 @@ getPackageModules sname pname = withStorage $ do
                 [] -> return []
 
 lookupSnapshotPackage
-    :: HasStorage env
+    :: GetStackageDatabase env m
     => SnapshotId
     -> Text
-    -> RIO env (Maybe (Entity SnapshotPackage))
-lookupSnapshotPackage sid pname = withStorage $ do
+    -> m (Maybe (Entity SnapshotPackage))
+lookupSnapshotPackage sid pname = run $ do
     mp <- getBy $ UniquePackage pname
     case mp of
         Nothing -> return Nothing
         Just (Entity pid _) -> getBy $ UniqueSnapshotPackage sid pid
 
-getDeprecated :: HasStorage env => Text -> RIO env (Bool, [Text])
-getDeprecated name = withStorage $ do
+getDeprecated :: GetStackageDatabase env m => Text -> m (Bool, [Text])
+getDeprecated name = run $ do
     pids <- selectKeysList [PackageName ==. name] []
     case pids of
         [pid] -> do
@@ -682,10 +689,10 @@ data LatestInfo = LatestInfo
     }
     deriving (Show, Eq)
 
-getLatests :: HasStorage env
+getLatests :: GetStackageDatabase env m
            => Text -- ^ package name
-           -> RIO env [LatestInfo]
-getLatests pname = withStorage $ fmap (nub . concat) $ forM [True, False] $ \requireDocs -> do
+           -> m [LatestInfo]
+getLatests pname = run $ fmap (nub . concat) $ forM [True, False] $ \requireDocs -> do
     mlts <- latestHelper pname requireDocs
         (\s ln -> s E.^. SnapshotId E.==. ln E.^. LtsSnap)
         (\_ ln ->
@@ -734,8 +741,8 @@ latestHelper pname requireDocs clause order = do
         , liGhc = ghc
         }
 
-getDeps :: HasStorage env => Text -> Maybe Int -> RIO env [(Text, Text)]
-getDeps pname mcount = withStorage $ do
+getDeps :: GetStackageDatabase env m => Text -> Maybe Int -> m [(Text, Text)]
+getDeps pname mcount = run $ do
     mp <- getBy $ UniquePackage pname
     case mp of
         Nothing -> return []
@@ -748,8 +755,8 @@ getDeps pname mcount = withStorage $ do
   where
     toPair (E.Value x, E.Value y) = (x, y)
 
-getRevDeps :: HasStorage env => Text -> Maybe Int -> RIO env [(Text, Text)]
-getRevDeps pname mcount = withStorage $ do
+getRevDeps :: GetStackageDatabase env m => Text -> Maybe Int -> m [(Text, Text)]
+getRevDeps pname mcount = run $ do
     fmap (map toPair) $ E.select $ E.from $ \(d,p) -> do
         E.where_ $
             (d E.^. DepUses E.==. E.val pname) E.&&.
@@ -760,8 +767,8 @@ getRevDeps pname mcount = withStorage $ do
   where
     toPair (E.Value x, E.Value y) = (x, y)
 
-getDepsCount :: HasStorage env => Text -> RIO env (Int, Int)
-getDepsCount pname = withStorage $ (,)
+getDepsCount :: GetStackageDatabase env m => Text -> m (Int, Int)
+getDepsCount pname = run $ (,)
   <$> (do
           mp <- getBy $ UniquePackage pname
           case mp of
@@ -770,14 +777,14 @@ getDepsCount pname = withStorage $ (,)
       )
   <*> count [DepUses ==. pname]
 
-getPackage :: HasStorage env => Text -> RIO env (Maybe (Entity Package))
-getPackage = withStorage . getBy . UniquePackage
+getPackage :: GetStackageDatabase env m => Text -> m (Maybe (Entity Package))
+getPackage = run . getBy . UniquePackage
 
 getSnapshotsForPackage
-    :: HasStorage env
+    :: GetStackageDatabase env m
     => Text
-    -> RIO env [(Snapshot, Text)] -- version
-getSnapshotsForPackage pname = withStorage $ do
+    -> m [(Snapshot, Text)] -- version
+getSnapshotsForPackage pname = run $ do
     pid <- getPackageId pname
     fmap (map go) $ E.select $ E.from $ \(s, sp) -> do
       E.where_ $ s E.^. SnapshotId E.==. sp E.^. SnapshotPackageSnapshot
@@ -788,19 +795,19 @@ getSnapshotsForPackage pname = withStorage $ do
     go (Entity _ snapshot, E.Value version) = (snapshot, version)
 
 -- | Count snapshots that belong to a specific SnapshotBranch
-countSnapshots :: (HasStorage env) => Maybe SnapshotBranch -> RIO env Int
-countSnapshots Nothing                   = withStorage $ count ([] :: [Filter Snapshot])
-countSnapshots (Just NightlyBranch)      = withStorage $ count ([] :: [Filter Nightly])
-countSnapshots (Just LtsBranch)          = withStorage $ count ([] :: [Filter Lts])
-countSnapshots (Just (LtsMajorBranch x)) = withStorage $ count [LtsMajor ==. x]
+countSnapshots :: (GetStackageDatabase env m) => Maybe SnapshotBranch -> m Int
+countSnapshots Nothing                   = run $ count ([] :: [Filter Snapshot])
+countSnapshots (Just NightlyBranch)      = run $ count ([] :: [Filter Nightly])
+countSnapshots (Just LtsBranch)          = run $ count ([] :: [Filter Lts])
+countSnapshots (Just (LtsMajorBranch x)) = run $ count [LtsMajor ==. x]
 
 -- | Get snapshots that belong to a specific SnapshotBranch
-getSnapshots :: (HasStorage env)
+getSnapshots :: (GetStackageDatabase env m)
              => Maybe SnapshotBranch
              -> Int -- ^ limit
              -> Int -- ^ offset
-             -> RIO env [Entity Snapshot]
-getSnapshots mBranch l o = withStorage $ case mBranch of
+             -> m [Entity Snapshot]
+getSnapshots mBranch l o = run $ case mBranch of
     Nothing -> selectList [] [LimitTo l, OffsetBy o, Desc SnapshotCreated]
     Just NightlyBranch ->
         E.select $ E.from $ \(nightly `E.InnerJoin` snapshot) -> do
@@ -826,11 +833,11 @@ getSnapshots mBranch l o = withStorage $ case mBranch of
             E.offset $ fromIntegral o
             pure snapshot
 
-last5Lts5Nightly :: HasStorage env => RIO env [SnapName]
+last5Lts5Nightly :: GetStackageDatabase env m => m [SnapName]
 last5Lts5Nightly = lastXLts5Nightly 5
 
-lastXLts5Nightly :: HasStorage env => Int -> RIO env [SnapName]
-lastXLts5Nightly ltsCount = withStorage $ do
+lastXLts5Nightly :: GetStackageDatabase env m => Int -> m [SnapName]
+lastXLts5Nightly ltsCount = run $ do
     ls <- selectList [] [Desc LtsMajor, Desc LtsMinor, LimitTo ltsCount]
     ns <- selectList [] [Desc NightlyDay, LimitTo 5]
     return $ map l ls <> map n ns
@@ -838,7 +845,7 @@ lastXLts5Nightly ltsCount = withStorage $ do
     l (Entity _ x) = SNLts (ltsMajor x) (ltsMinor x)
     n (Entity _ x) = SNNightly (nightlyDay x)
 
-snapshotsJSON :: HasStorage env => RIO env A.Value
+snapshotsJSON :: GetStackageDatabase env m => m A.Value
 snapshotsJSON = do
     mlatestNightly <- newestNightly
     ltses <- ltsMajorVersions
@@ -859,14 +866,14 @@ snapshotsJSON = do
 
     printNightly day = "nightly-" <> T.pack (show day)
 
-getPackageCount :: HasStorage env
+getPackageCount :: GetStackageDatabase env m
                 => SnapshotId
-                -> RIO env Int
-getPackageCount sid = withStorage $ count [SnapshotPackageSnapshot ==. sid]
+                -> m Int
+getPackageCount sid = run $ count [SnapshotPackageSnapshot ==. sid]
 
-getLatestLtsByGhc :: HasStorage env
-                  => RIO env [(Int, Int, Text, Day)]
-getLatestLtsByGhc = withStorage $ fmap (dedupe . map toTuple) $ do
+getLatestLtsByGhc :: GetStackageDatabase env m
+                  => m [(Int, Int, Text, Day)]
+getLatestLtsByGhc = run $ fmap (dedupe . map toTuple) $ do
     E.select $ E.from $ \(lts `E.InnerJoin` snapshot) -> do
         E.on $ lts E.^. LtsSnap E.==. snapshot E.^. SnapshotId
         E.orderBy [E.desc (lts E.^. LtsMajor), E.desc (lts E.^. LtsMinor)]
