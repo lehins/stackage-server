@@ -1,21 +1,35 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE RecordWildCards   #-}
 module Stackage.Database.Types
     ( SnapName (..)
     , isLts
     , isNightly
-    , Stackage(..)
-    , HasStorage(..)
+    , StackageCron(..)
+    , PantryHackageCabal(..)
+    , PantryTree(..)
+    , PantryPackage(..)
+    , SnapshotFile(..)
+    , PackageListingInfo(..)
+    , ModuleListingInfo(..)
+    , LatestInfo(..)
     ) where
 
-import RIO
-import RIO.Time
-import qualified RIO.Text as T
-import Web.PathPieces
-import Data.Aeson
-import Data.Text.Read (decimal)
-import Database.Persist
-import Database.Persist.Sql hiding (LogFunc)
-import Pantry.Types
+import           Data.Aeson
+import qualified Data.Text                      as T
+import           Data.Text.Read                 (decimal)
+import qualified Data.Text.Read                 as T (decimal)
+import           Database.Persist
+import           Database.Persist.Sql           hiding (LogFunc)
+import           Distribution.Types.PackageName (mkPackageName)
+import           Pantry.SHA256
+import           Pantry.Types
+import           RIO
+import           RIO.Process                    (HasProcessContext (..),
+                                                 ProcessContext)
+import           RIO.Time
+import           Stackage.Types                 (simpleParse)
+import           Web.PathPieces
 
 data SnapName = SNLts !Int !Int
               | SNNightly !Day
@@ -40,36 +54,158 @@ instance PersistField SnapName where
         t <- fromPersistValue v
         case fromPathPiece t of
             Nothing -> Left $ "Invalid SnapName: " <> t
-            Just x -> return x
+            Just x  -> return x
 instance PersistFieldSql SnapName where
     sqlType = sqlType . fmap toPathPiece
 instance PathPiece SnapName where
-    toPathPiece (SNLts x y) = T.concat ["lts-", T.pack (show x), ".", T.pack (show y)]
-    toPathPiece (SNNightly d) = "nightly-" <> T.pack (show d)
+    toPathPiece = showSnapName
 
-    fromPathPiece t0 =
-        nightly <|> lts
-      where
-        nightly = fmap SNNightly $ T.stripPrefix "nightly-" t0 >>= (readMaybe . T.unpack)
-        lts = do
-            t1 <- T.stripPrefix "lts-" t0
-            Right (x, t2) <- Just $ decimal t1
-            t3 <- T.stripPrefix "." t2
-            Right (y, "") <- Just $ decimal t3
-            return $ SNLts x y
+    fromPathPiece = parseSnapName
+
+instance FromJSON SnapName where
+  parseJSON = withText "SnapName" (maybe (fail "Can't parse snapshot name") pure . parseSnapName)
+
+showSnapName :: SnapName -> Text
+showSnapName (SNLts x y) = T.concat ["lts-", T.pack (show x), ".", T.pack (show y)]
+showSnapName (SNNightly d) = "nightly-" <> T.pack (show d)
+
+parseSnapName :: Text -> Maybe SnapName
+parseSnapName t0 = nightly <|> lts
+  where
+    nightly = fmap SNNightly $ T.stripPrefix "nightly-" t0 >>= (readMaybe . T.unpack)
+    lts = do
+        t1 <- T.stripPrefix "lts-" t0
+        Right (x, t2) <- Just $ decimal t1
+        t3 <- T.stripPrefix "." t2
+        Right (y, "") <- Just $ decimal t3
+        return $ SNLts x y
 
 
-data Stackage = Stackage
-    { sPantryConfig :: PantryConfig
-    , sStackageRoot :: FilePath
-    , sLogFunc :: LogFunc
+data StackageCron = StackageCron
+    { scPantryConfig   :: !PantryConfig
+    , scStackageRoot   :: !FilePath
+    , scLogFunc        :: !LogFunc
+    , scProcessContext :: !ProcessContext
     }
 
-instance HasLogFunc Stackage where
-  logFuncL = lens sLogFunc (\c f -> c {sLogFunc = f})
+instance HasLogFunc StackageCron where
+  logFuncL = lens scLogFunc (\c f -> c {scLogFunc = f})
 
-instance HasPantryConfig Stackage where
-  pantryConfigL = lens sPantryConfig (\c f -> c {sPantryConfig = f})
+instance HasProcessContext StackageCron where
+  processContextL = lens scProcessContext (\c f -> c {scProcessContext = f})
 
-instance HasStorage Stackage where
-  storageG = to (pcStorage . sPantryConfig)
+instance HasPantryConfig StackageCron where
+  pantryConfigL = lens scPantryConfig (\c f -> c {scPantryConfig = f})
+
+instance HasStorage StackageCron where
+  storageG = to (pcStorage . scPantryConfig)
+
+
+data PantryHackageCabal = PantryHackageCabal
+  { phcPackageName    :: !PackageNameP
+  , phcPackageVersion :: !VersionP
+  , phcSHA256         :: !SHA256
+  , phcFileSize       :: !FileSize
+  } deriving Show
+
+data PantryTree = PantryTree
+  { ptSHA256   :: !SHA256
+  , ptFileSize :: !FileSize
+  } deriving (Eq, Show)
+
+data PantryPackage =
+  PantryHackagePackage !PantryHackageCabal !PantryTree
+
+data SnapshotFile = SnapshotFile
+  { sfName     :: !SnapName
+  , sfCompiler :: !Text
+  , sfPackages :: ![PantryPackage]
+  , sfHidden   :: !(Map PackageNameP Bool)
+  , sfFlags    :: !(Map PackageNameP (Map Text Bool))
+  }
+
+
+-- orphans, TODO: move to pantry
+
+instance FromJSON VersionP where
+    parseJSON = withText "VersionP" $ either (fail . show) (pure . VersionP) . simpleParse
+instance FromJSON PackageNameP where
+    parseJSON = withText "PackageNameP" $ pure . PackageNameP . mkPackageName . T.unpack
+instance FromJSONKey PackageNameP where
+    fromJSONKey = FromJSONKeyText $ PackageNameP . mkPackageName . T.unpack
+
+
+instance FromJSON PantryHackageCabal where
+    parseJSON =
+        withText "PantryHackageCabal" $ \txt -> do
+            let (packageTxt, hashWithSize) = T.break (== '@') txt
+                (hashTxtWithAlgo, sizeWithComma) = T.break (== ',') hashWithSize
+            -- Split package identifier foo-bar-0.1.2 into package name and version
+            (pkgNameTxt, pkgVersionTxt) <-
+                case T.breakOnEnd ("-") packageTxt of
+                    (pkgNameWithDashEnd, pkgVersionTxt)
+                        | Just pkgName <- T.stripSuffix "-" pkgNameWithDashEnd ->
+                            return (pkgName, pkgVersionTxt)
+                    _ -> fail $ "Invalid package identifier format: " ++ T.unpack packageTxt
+            phcPackageName <- parseJSON $ String pkgNameTxt
+            phcPackageVersion <- parseJSON $ String pkgVersionTxt
+            hashTxt <-
+                maybe (fail $ "Unrecognized hashing algorithm: " ++ T.unpack hashTxtWithAlgo) pure $
+                T.stripPrefix "@sha256:" hashTxtWithAlgo
+            phcSHA256 <- either (fail . displayException) pure $ fromHexText hashTxt
+            (phcFileSize, "") <-
+                either fail (pure . first FileSize) =<<
+                maybe
+                    (fail $ "Wrong size format:" ++ show sizeWithComma)
+                    (pure . T.decimal)
+                    (T.stripPrefix "," sizeWithComma)
+            return PantryHackageCabal {..}
+
+instance FromJSON PantryTree where
+    parseJSON = withObject "PantryTree" $ \obj -> do
+      ptSHA256 <- obj .: "sha256"
+      ptFileSize <- obj .: "size"
+      return PantryTree {..}
+
+instance FromJSON PantryPackage where
+    parseJSON =
+        withObject "PantryPackage" $ \obj ->
+            PantryHackagePackage <$> obj .: "hackage" <*> obj .: "pantry-tree"
+
+
+instance FromJSON SnapshotFile where
+  parseJSON = withObject "SnapshotFile" $ \obj -> do
+    sfName <- obj .: "name"
+    sfCompiler <- obj .: "compiler"
+    sfPackages <- obj .: "packages"
+    sfHidden <- obj .:? "hidden" .!= mempty
+    sfFlags <- obj .:? "flags" .!= mempty
+    return SnapshotFile {..}
+
+
+
+data PackageListingInfo = PackageListingInfo
+    { pliName     :: !Text
+    , pliVersion  :: !Text
+    , pliSynopsis :: !Text
+    , pliIsCore   :: !Bool
+    } deriving Show
+
+instance ToJSON PackageListingInfo where
+   toJSON PackageListingInfo{..} =
+       object [ "name"     .= pliName
+              , "version"  .= pliVersion
+              , "synopsis" .= pliSynopsis
+              , "isCore"   .= pliIsCore
+              ]
+
+data ModuleListingInfo = ModuleListingInfo
+    { mliName           :: !Text
+    , mliPackageVersion :: !Text
+    } deriving Show
+
+data LatestInfo = LatestInfo
+    { liSnapName :: !SnapName
+    , liVersion  :: !Text
+    , liGhc      :: !Text
+    } deriving (Show, Eq, Ord)

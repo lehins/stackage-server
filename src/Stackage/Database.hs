@@ -51,13 +51,17 @@ module Stackage.Database
 
 import RIO
 import RIO.Time
+import RIO.Process
 import qualified RIO.Text as T
 import qualified RIO.Set as Set
 import qualified RIO.Map as Map
 import qualified RIO.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBS8
+import qualified Data.ByteString.Char8 as BS8
 import RIO.FilePath
 import RIO.Directory (removeFile, getAppUserDataDirectory, doesDirectoryExist, createDirectoryIfMissing)
 import Conduit
+import qualified Data.Conduit.List as CL
 import Web.PathPieces (toPathPiece)
 import qualified Codec.Archive.Tar as Tar
 import Database.Esqueleto.Internal.Language (From)
@@ -67,8 +71,6 @@ import System.FilePath (takeBaseName, takeExtension)
 import Text.Blaze.Html (Html, toHtml, preEscapedToHtml)
 import Yesod.Form.Fields (Textarea (..))
 import Stackage.Database.Types
-import System.FilePath (takeFileName, takeDirectory)
-import Data.Conduit.Process
 import Stackage.Types
 import Stackage.Metadata
 import Stackage.PackageIndex.Conduit
@@ -78,20 +80,19 @@ import Database.Persist
 import Database.Persist.Postgresql
 import Database.Persist.TH
 import Control.Monad.Logger (runNoLoggingT)
-import System.IO.Temp
 import qualified Database.Esqueleto as E
 import qualified Data.Aeson as A
 import Types (SnapshotBranch(..))
 import Data.Pool (destroyAllResources)
-import Data.List as L (isPrefixOf, nub)
-import Pantry.Types (Storage(Storage), HasStorage(storageG), HasPantryConfig)
+import Data.List as L (stripPrefix, isPrefixOf)
+import Pantry.Types (Storage(Storage), HasStorage(storageG))
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
 import Pantry.Hackage (updateHackageIndex, DidUpdateOccur(..))
 import Control.Monad.Trans.Class (lift)
 
 currentSchema :: Int
-currentSchema = 1
+currentSchema = 1 -- TODO: change to 2
 
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
 Schema
@@ -106,6 +107,7 @@ Snapshot
     name SnapName
     ghc Text
     created Day
+    updatedOn UTCTime
     UniqueSnapshot name
 Lts
     snap SnapshotId
@@ -137,6 +139,7 @@ SnapshotHackagePackage
     snapshot SnapshotId
     cabal HackageCabalId
     package HackageTarballId
+    isHidden Bool default=False
     UniqueSnapshotHackagePackage snapshot package
 Module
     package SnapshotPackageId
@@ -190,56 +193,116 @@ instance (HasStorage env, MonadIO m) => GetStackageDatabase env (ReaderT env m) 
 instance HasStorage env => GetStackageDatabase env (RIO env) where
     getStackageDatabase = view storageG
 
-sourcePackages :: MonadResource m => FilePath -> ConduitT i Tar.Entry m ()
-sourcePackages root = do
-    dir <- liftIO $ cloneOrUpdate root "commercialhaskell" "all-cabal-metadata"
-    bracketP
-        (do
-            (fp, h) <- openBinaryTempFile "/tmp" "all-cabal-metadata.tar"
-            hClose h
-            return fp)
-        removeFile
-        $ \fp -> do
-            liftIO $ runIn dir "git" ["archive", "--output", fp, "--format", "tar", "master"]
-            sourceTarFile False fp
-
-sourceBuildPlans :: MonadResource m => FilePath -> ConduitT i (SnapName, FilePath, Either (IO BuildPlan) (IO DocMap)) m ()
-sourceBuildPlans root = do
-    forM_ ["lts-haskell", "stackage-nightly"] $ \repoName -> do
-        dir <- liftIO $ cloneOrUpdate root "fpco" repoName
-        sourceDirectory dir .| concatMapMC (go Left . fromString)
-        let docdir = dir </> "docs"
-        whenM (liftIO $ doesDirectoryExist docdir) $
-            sourceDirectory docdir .| concatMapMC (go Right . fromString)
+sourceSnapshots
+  :: (MonadReader env m, MonadReader StackageCron (t m),
+      HasLogFunc env, HasProcessContext env, MonadResource (t m), MonadTrans t, MonadIO m) =>
+     ConduitT a (SnapshotFile, Day, UTCTime) (t m) ()
+sourceSnapshots = do
+    rootDir <- scStackageRoot <$> lift ask
+    gitDir <- lift $ cloneOrUpdate rootDir "commercialhaskell" "stackage-snapshots"
+    sourceDirectoryDeep False (gitDir </> "lts") .| concatMapMC (parseLts gitDir)
+    sourceDirectoryDeep False (gitDir </> "nightly") .| concatMapMC (parseNightly gitDir)
   where
-    go wrapper fp | Just name <- nameFromFP fp = liftIO $ do
-        let bp = decodeFileEither fp >>= either throwIO return
-        return $ Just (name, fp, wrapper bp)
-    go _ _ = return Nothing
+    parseSnapshot gitDir fp snapName = do
+        esnap <- liftIO $ decodeFileEither fp
+        case esnap of
+            Right snap
+                | snapName == sfName snap -> do
+                    let gitLog args =
+                            lift $
+                            withWorkingDir gitDir $
+                            proc "git" ("log" : (args ++ [fp])) readProcessStdout_
+                    lastCommitTimestamps <- gitLog ["-1", "--format=%cD"]
+                    authorDates <- gitLog ["--reverse", "--date=short", "--format=%ad"]
+                    let parseGitDate fmt dates = do
+                            date <- listToMaybe $ LBS8.lines dates
+                            parseTimeM False defaultTimeLocale fmt (LBS8.unpack date)
+                    let snapAndDates = do
+                            createdOn <- parseGitDate "%F" authorDates
+                            updatedOn <- parseGitDate rfc822DateFormat lastCommitTimestamps
+                            return (snap, createdOn, updatedOn)
+                    when (isNothing snapAndDates) $
+                        (lift $
+                         logError $
+                         "Issue parsing the git log timestamps: " <>
+                         displayShow (lastCommitTimestamps, authorDates))
+                    return snapAndDates
+            Right snap -> do
+                logError $
+                    "Snapshot name mismath. Received: " <> displayShow (sfName snap) <>
+                    " in the file: " <>
+                    display (T.pack fp)
+                return Nothing
+            Left exc -> do
+                lift $ logError $ display $ T.pack $ displayException exc
+                return Nothing
+    parseLts gitDir fp = do
+        case mapM (BS8.readInt . BS8.pack) $ take 2 $ reverse (splitPath fp) of
+            Just [(minor, ".yaml"), (major, "/")] -> parseSnapshot gitDir fp $ SNLts major minor
+            _ -> do
+                lift $
+                    logError
+                        ("Couldn't parse the filepath into an LTS version: " <> display (T.pack fp))
+                return Nothing
+    parseNightly gitDir fp = do
+        case mapM (BS8.readInt . BS8.pack) $ take 3 $ reverse (splitPath fp) of
+            Just [(day, ".yaml"), (month, "/"), (year, "/")]
+                | Just date <- fromGregorianValid (fromIntegral year) month day ->
+                    parseSnapshot gitDir fp $ SNNightly date
+            _ -> do
+                lift $
+                    logError
+                        ("Couldn't parse the filepath into an Nightly date: " <> display (T.pack fp))
+                return Nothing
+  --   let docdir = dir </> "docs"
+  --   whenM (liftIO $ doesDirectoryExist docdir) $
+  --       sourceDirectory docdir .| concatMapMC (go Right . fromString)
+  -- where
+  --   go wrapper fp | Just name <- nameFromFP fp = liftIO $ do
+  --       let bp = decodeFileEither fp >>= either throwIO return
+  --       return $ Just (name, fp, wrapper bp)
+  --   go _ _ = return Nothing
+  --   nameFromFP fp = do
+  --       base <- T.stripSuffix ".yaml" $ T.pack $ takeFileName fp
+  --       fromPathPiece base
 
-    nameFromFP fp = do
-        base <- T.stripSuffix ".yaml" $ T.pack $ takeFileName fp
-        fromPathPiece base
+-- sourceBuildPlans :: MonadResource m => FilePath -> ConduitT i (SnapName, FilePath, Either (IO BuildPlan) (IO DocMap)) m ()
+-- sourceBuildPlans root = do
+--     forM_ ["lts-haskell", "stackage-nightly"] $ \repoName -> do
+--         dir <- cloneOrUpdate root "fpco" repoName
+--         sourceDirectory dir .| concatMapMC (go Left . fromString)
+--         let docdir = dir </> "docs"
+--         whenM (liftIO $ doesDirectoryExist docdir) $
+--             sourceDirectory docdir .| concatMapMC (go Right . fromString)
+--   where
+--     go wrapper fp | Just name <- nameFromFP fp = liftIO $ do
+--         let bp = decodeFileEither fp >>= either throwIO return
+--         return $ Just (name, fp, wrapper bp)
+--     go _ _ = return Nothing
 
-cloneOrUpdate :: FilePath -> String -> String -> IO FilePath
+--     nameFromFP fp = do
+--         base <- T.stripSuffix ".yaml" $ T.pack $ takeFileName fp
+--         fromPathPiece base
+
+cloneOrUpdate ::
+       (MonadReader env m, HasLogFunc env, HasProcessContext env, MonadIO m)
+    => FilePath
+    -> String
+    -> String
+    -> m FilePath
 cloneOrUpdate root org name = do
     exists <- doesDirectoryExist dest
     if exists
-        then do
-            let git = runIn dest "git"
-            git ["fetch"]
-            git ["reset", "--hard", "origin/master"]
-        else runIn root "git" ["clone", url, name]
+        then withWorkingDir dest $ do
+            proc "git" ["fetch"] runProcess_
+            proc "git" ["reset", "--hard", "origin/master"] runProcess_
+        else withWorkingDir root $ do
+            proc "git" ["clone", url, name] runProcess_
     return dest
   where
     url = "https://github.com/" <> org <> "/" <> name <> ".git"
-    dest = root </> fromString name
+    dest = root </> name
 
-runIn :: FilePath -> String -> [String] -> IO ()
-runIn dir cmd args =
-    withCheckedProcess cp $ \ClosedStream Inherited Inherited -> return ()
-  where
-    cp = (proc cmd args) { cwd = Just dir }
 
 openStackageDatabase :: MonadIO m => PostgresConf -> m Storage
 openStackageDatabase pg = liftIO $ do
@@ -255,61 +318,47 @@ getSchema = do
         Right [Entity _ (Schema v)] -> return $ Just v
         _ -> return Nothing
 
-createStackageDatabase :: (HasLogFunc env, HasPantryConfig env) => RIO env ()
+createStackageDatabase :: RIO StackageCron ()
 createStackageDatabase = do
     logInfo "Entering createStackageDatabase"
     actualSchema <- getSchema
     let schemaMatch = actualSchema == Just currentSchema
     unless schemaMatch $ do
-        logError $ "Current schema does not match actual schema: " <>
-          displayShow (actualSchema, currentSchema)
-
+        logWarn $
+            "Current schema does not match actual schema: " <>
+            displayShow (actualSchema, currentSchema)
     withStorage $ do
         runMigration Pantry.migrateAll
         runMigration migrateAll
         unless schemaMatch $ insert_ $ Schema currentSchema
     didUpdate <- updateHackageIndex True (Just "Stackage Server cron job")
     case didUpdate of
-      UpdateOccurred -> logInfo "Updated hackage index"
-      NoUpdateOccurred -> logInfo "No new packages in hackage index"
+        UpdateOccurred -> logInfo "Updated hackage index"
+        NoUpdateOccurred -> logInfo "No new packages in hackage index"
     logWarn "FIXME: update stackage snapshots repos"
-    -- root <- (</> "database") <$> getAppUserDataDirectory "stackage"
-    -- createDirectoryIfMissing True root
-    -- Storage pool <- view storageG
-    -- liftRIO $ runResourceT $ do
-    --     logInfo "Updating all-cabal-metadata repo"
-    --     flip runSqlPool pool $ runConduit $ sourcePackages root .| getZipSink
-    --         ( ZipSink (mapM_C addPackage)
-    --        *> ZipSink (do
-    --             deprs <- foldlC getDeprecated' []
-    --             lift $ do
-    --                 deleteWhere ([] :: [Filter Deprecated])
-    --                 mapM_ addDeprecated deprs)
-    --        *> ZipSink (
-    --             let loop i =
-    --                     await >>= maybe (return ()) (const $ go $ i + 1)
-    --                 go i = do
-    --                     -- when (i `mod` 500 == 0)
-    --                     --     $ putStrLn $ concat
-    --                     --         [ "Processed "
-    --                     --         , tshow i
-    --                     --         , " packages"
-    --                     --         ]
-    --                     loop i
-    --              in loop (0 :: Int))
-    --         )
-    --     runConduit $ sourceBuildPlans root .| mapM_C (\(sname, fp', eval) -> flip runSqlPool pool $ do
-    --         let (typ, action) =
-    --                 case eval of
-    --                     Left bp -> ("build-plan", liftIO bp >>= addPlan sname fp')
-    --                     Right dm -> ("doc-map", liftIO dm >>= addDocMap sname)
-    --         let i = Imported sname typ
-    --         eres <- insertBy i
-    --         case eres of
-    --             Left _ -> pure () -- putStrLn $ "Skipping: " <> tshow fp'
-    --             Right _ -> action
-    --         )
-    --     flip runSqlPool pool $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
+    runConduitRes $
+        sourceSnapshots .| --updateSnapshot
+        mapM_C
+            (\(snap, createdOn, updatedOn) ->
+                 lift $
+                 logInfo $
+                 "Parsed: " <> displayShow (sfName snap) <> " createdOn: " <> displayShow createdOn <>
+                 " updatedOn: " <>
+                 displayShow updatedOn)
+        -- sourceBuildPlans rootDir .|
+        -- mapM_C
+        --     (\(sname, fp', eval) ->
+        --          flip runSqlPool pool $ do
+        --              let (typ, action) =
+        --                      case eval of
+        --                          Left bp -> ("build-plan", liftIO bp >>= addPlan sname fp')
+        --                          Right dm -> ("doc-map", liftIO dm >>= addDocMap sname)
+        --              let i = Imported sname typ
+        --              eres <- insertBy i
+        --              case eres of
+        --                  Left _ -> lift $ logInfo $ "Skipping: " <> displayShow fp'
+        --                  Right _ -> action)
+    withStorage $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
 
 getDeprecated' :: [Deprecation] -> Tar.Entry -> [Deprecation]
 getDeprecated' orig e =
@@ -390,80 +439,85 @@ addPackage e =
     renderContent txt "haddock" = renderHaddock txt
     renderContent txt _ = toHtml $ Textarea txt
 
-addPlan :: HasLogFunc env => SnapName -> FilePath -> BuildPlan -> SqlPersistT (RIO env) ()
-addPlan name fp bp = do
-    lift $ logInfo $ "Adding build plan: " <> display (toPathPiece name)
-    created <-
-        case name of
-            SNNightly d -> return d
-            SNLts _ _ -> do
-                let cp' = proc "git"
-                        [ "log"
-                        , "--format=%ad"
-                        , "--date=short"
-                        , takeFileName fp
-                        ]
-                    cp = cp' { cwd = Just $ takeDirectory fp }
-                t <- withCheckedProcess cp $ \ClosedStream out ClosedStream ->
-                    runConduit $ out .| decodeUtf8C .| foldC
-                case readMaybe $ T.unpack $ T.concat $ take 1 $ T.words t of
-                    Just created -> return created
-                    Nothing -> do
-                        lift $ logInfo $ "Warning: unknown git log output: " <> displayShow t
-                        return $ fromGregorian 1970 1 1
-    sid <- insert Snapshot
-        { snapshotName = name
-        , snapshotGhc = dtDisplay $ siGhcVersion $ bpSystemInfo bp
-        , snapshotCreated = created
-        }
-    forM_ allPackages $ \(dtDisplay -> pname, (dtDisplay -> version, isCore)) -> do
-        pid <- getPackageId pname
-        insert_ SnapshotPackage
-            { snapshotPackageSnapshot = sid
-            , snapshotPackagePackage = pid
-            , snapshotPackageIsCore = isCore
-            , snapshotPackageVersion = version
-            }
-    case name of
-        SNLts x y -> insert_ Lts
-            { ltsSnap = sid
-            , ltsMajor = x
-            , ltsMinor = y
-            }
-        SNNightly d -> insert_ Nightly
-            { nightlySnap = sid
-            , nightlyDay = d
-            }
-  where
-    allPackages =
-        Map.toList
-            $ fmap (, True) (siCorePackages $ bpSystemInfo bp)
-           <> fmap ((, False) . ppVersion) (bpPackages bp)
+-- addPlan
+--   :: (MonadReader env m, MonadThrow m, MonadIO m, HasLogFunc env) =>
+--      SnapName -> FilePath -> BuildPlan -> ReaderT SqlBackend m ()
+-- addPlan name fp bp = do
+--     lift $ logInfo $ "Adding build plan: " <> display (toPathPiece name)
+--     created <-
+--         case name of
+--             SNNightly d -> return d
+--             SNLts _ _ -> do
+--                 let cp' = proc "git"
+--                         [ "log"
+--                         , "-1"
+--                         , "--format=%ad"
+--                         , "--date=short"
+--                         , takeFileName fp
+--                         ]
+--                     cp = cp' { cwd = Just $ takeDirectory fp }
+--                 t <- withCheckedProcess cp $ \ClosedStream out ClosedStream ->
+--                     runConduit $ out .| decodeUtf8C .| foldC
+--                 case readMaybe $ T.unpack $ T.concat $ take 1 $ T.words t of
+--                     Just created -> return created
+--                     Nothing -> do
+--                         lift $ logInfo $ "Warning: unknown git log output: " <> displayShow t
+--                         return $ fromGregorian 1970 1 1
+--     sid <- insert Snapshot
+--         { snapshotName = name
+--         , snapshotGhc = dtDisplay $ siGhcVersion $ bpSystemInfo bp
+--         , snapshotCreated = created
+--         }
+--     forM_ allPackages $ \(dtDisplay -> pname, (dtDisplay -> version, isCore)) -> do
+--         pid <- getPackageId pname
+--         insert_ SnapshotPackage
+--             { snapshotPackageSnapshot = sid
+--             , snapshotPackagePackage = pid
+--             , snapshotPackageIsCore = isCore
+--             , snapshotPackageVersion = version
+--             }
+--     case name of
+--         SNLts x y -> insert_ Lts
+--             { ltsSnap = sid
+--             , ltsMajor = x
+--             , ltsMinor = y
+--             }
+--         SNNightly d -> insert_ Nightly
+--             { nightlySnap = sid
+--             , nightlyDay = d
+--             }
+--   where
+--     allPackages =
+--         Map.toList
+--             $ fmap (, True) (siCorePackages $ bpSystemInfo bp)
+--            <> fmap ((, False) . ppVersion) (bpPackages bp)
 
-addDocMap :: HasLogFunc env => SnapName -> DocMap -> SqlPersistT (RIO env) ()
-addDocMap name dm = do
-    sids <- selectKeysList [SnapshotName ==. name] []
-    case sids of
-      [] -> lift $ logError $ "Couldn't find a snapshot by the name: " <> displayShow name
-      [sid] -> do
-         lift $ logInfo $ "Adding doc map: " <> display (toPathPiece name)
-         forM_ (Map.toList dm) $ \(pkg, pd) -> do
-             pids <- selectKeysList [PackageName ==. pkg] []
-             pid <-
-               case pids of
-                 [pid] -> return pid
-                 _ -> error $ "addDocMap (1): " <> show (name, pkg, pids)
-             spids <- selectKeysList [SnapshotPackageSnapshot ==. sid, SnapshotPackagePackage ==. pid] []
-             case spids of
-               [spid] ->
-                 forM_ (Map.toList $ pdModules pd) $ \(mname, _paths) ->
-                     insert_ Module
-                         { modulePackage = spid
-                         , moduleName = mname
-                         }
-               -- FIXME figure out why this happens for the ghc package with GHC 8.2.1
-               _ -> lift $ logError $ "addDocMap (2): " <> displayShow (name, pkg, pid, spids)
-      xs -> lift $ logError $ "Impossible happened: unique key constraint failure: " <> displayShow xs
+-- addDocMap
+--   :: (MonadReader env m, MonadIO m, HasLogFunc env) =>
+--      SnapName -> Map Text PackageDocs -> ReaderT SqlBackend m ()
+-- addDocMap name dm = do
+--     sids <- selectKeysList [SnapshotName ==. name] []
+--     case sids of
+--       [] -> lift $ logError $ "Couldn't find a snapshot by the name: " <> displayShow name
+--       [sid] -> do
+--          lift $ logInfo $ "Adding doc map: " <> display (toPathPiece name)
+--          forM_ (Map.toList dm) $ \(pkg, pd) -> do
+--              pids <- selectKeysList [PackageName ==. pkg] []
+--              pid <-
+--                case pids of
+--                  [pid] -> return pid
+--                  _ -> error $ "addDocMap (1): " <> show (name, pkg, pids)
+--              spids <- selectKeysList [SnapshotPackageSnapshot ==. sid, SnapshotPackagePackage ==. pid] []
+--              case spids of
+--                [spid] ->
+--                  forM_ (Map.toList $ pdModules pd) $ \(mname, _paths) ->
+--                      insert_ Module
+--                          { modulePackage = spid
+--                          , moduleName = mname
+--                          }
+--                -- FIXME figure out why this happens for the ghc package with GHC 8.2.1
+--                _ -> lift $ logError $ "addDocMap (2): " <> displayShow (name, pkg, pid, spids)
+--       xs -> lift $ logError $ "Impossible happened: unique key constraint failure: " <> displayShow xs
 
 
 run :: GetStackageDatabase env m => SqlPersistT IO a -> m a
@@ -552,21 +606,6 @@ getAllPackages = liftM (map toPair) $ run $ do
   where
     toPair (E.Value x, E.Value y, E.Value z) = (x, y, z)
 
-data PackageListingInfo = PackageListingInfo
-    { pliName :: !Text
-    , pliVersion :: !Text
-    , pliSynopsis :: !Text
-    , pliIsCore :: !Bool
-    }
-
-instance A.ToJSON PackageListingInfo where
-   toJSON PackageListingInfo{..} =
-       A.object [ "name"     A..= pliName
-                , "version"  A..= pliVersion
-                , "synopsis" A..= pliSynopsis
-                , "isCore"   A..= pliIsCore
-                ]
-
 getPackages :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
 getPackages sid = liftM (map toPLI) $ run $ do
     E.select $ E.from $ \(p,sp) -> do
@@ -604,10 +643,6 @@ getPackageVersionBySnapshot sid name = liftM (listToMaybe . map toPLI) $ run $ d
   where
     toPLI (E.Value version) = version
 
-data ModuleListingInfo = ModuleListingInfo
-    { mliName :: !Text
-    , mliPackageVersion :: !Text
-    }
 
 getSnapshotModules
     :: GetStackageDatabase env m
@@ -682,17 +717,11 @@ getDeprecated name = run $ do
 
     getName = fmap (fmap packageName) . get
 
-data LatestInfo = LatestInfo
-    { liSnapName :: !SnapName
-    , liVersion :: !Text
-    , liGhc :: !Text
-    }
-    deriving (Show, Eq)
 
 getLatests :: GetStackageDatabase env m
            => Text -- ^ package name
            -> m [LatestInfo]
-getLatests pname = run $ fmap (nub . concat) $ forM [True, False] $ \requireDocs -> do
+getLatests pname = run $ fmap (nubOrd . concat) $ forM [True, False] $ \requireDocs -> do
     mlts <- latestHelper pname requireDocs
         (\s ln -> s E.^. SnapshotId E.==. ln E.^. LtsSnap)
         (\_ ln ->

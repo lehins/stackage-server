@@ -15,4 +15,3 @@ packages:
 - tar-conduit-0.3.0@rev:0
 - yaml-0.10.4.0@rev:0 #for hpack-0.31
 - lens-4.17
-- resourcet-1.2.2

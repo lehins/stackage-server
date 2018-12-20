@@ -9,6 +9,7 @@ module Stackage.Types
   , PackageName
   , Version
   , dtDisplay
+  , simpleParse
   ) where
 
 import qualified Distribution.Text               as DT
@@ -18,6 +19,7 @@ import Distribution.Types.PackageName (PackageName, mkPackageName)
 import Distribution.Version (Version)
 import Control.Monad.Catch (MonadThrow, throwM)
 import Data.Typeable (TypeRep, Typeable, typeOf)
+import Pantry.Types
 
 data BuildPlan = BuildPlan
   { bpSystemInfo :: !SystemInfo
@@ -87,6 +89,8 @@ instance FromJSON PackageName where
   parseJSON = withText "PackageName" $ pure . mkPackageName . unpack
 instance FromJSONKey PackageName where
   fromJSONKey = FromJSONKeyText $ mkPackageName . unpack
+
+
 
 -- data PackageOrigin
 --   = OriginCore

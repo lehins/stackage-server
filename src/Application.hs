@@ -191,7 +191,7 @@ getApplicationDev :: IO (Settings, Application)
 getApplicationDev = do
     settings <- getAppSettings
     logOpts <- getLogOpts settings
-    -- FIXME: finalizer is discarded. Could be OK for ghci and development?
+    -- FIXME: finalizer is discarded. Could be development?
     (logFunc, _ :: IO ()) <- newLogFunc logOpts
     foundation <- makeFoundation logFunc settings
     wsettings <- getDevSettings $ warpSettings foundation
@@ -234,7 +234,7 @@ getApplicationRepl :: IO (Int, App, Application)
 getApplicationRepl = do
     settings <- getAppSettings
     logOpts <- getLogOpts settings
-    -- FIXME: finalizer is discarded. Could be OK for ghci and development?
+    -- Note: finalizer is discarded. Should be OK for ghci.
     (logFunc, _ :: IO ()) <- newLogFunc logOpts
     foundation <- makeFoundation logFunc settings
     wsettings <- getDevSettings $ warpSettings foundation

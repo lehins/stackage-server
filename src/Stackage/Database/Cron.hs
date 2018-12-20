@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Database.Cron
     ( stackageServerCron
@@ -6,42 +6,44 @@ module Stackage.Database.Cron
     , singleRun
     ) where
 
-import RIO
-import qualified RIO.Text as T
-import qualified RIO.Map as Map
-import RIO.Directory
-import RIO.FilePath
-import Conduit
-import Stackage.PackageIndex.Conduit
-import Database.Persist (Entity (Entity))
-import qualified Codec.Archive.Tar as Tar
-import Stackage.Database
-import Stackage.Database.Types (Stackage(..))
-import Network.HTTP.Client
-import Network.HTTP.Client.Conduit (bodyReaderSource)
-import Web.PathPieces (toPathPiece)
-import Network.HTTP.Types (status200)
-import           Data.Streaming.Network (bindPortTCP)
-import           Network.AWS                   (Credentials (Discover), newEnv,
-                                                send, chunkedFile, defaultChunkSize,
-                                                envManager, runAWS)
+import qualified Codec.Archive.Tar             as Tar
+import           Conduit
 import           Control.Monad.Trans.AWS       (trying, _Error)
-import           Network.AWS.Data.Body         (toBody)
-import           Network.AWS.S3                (ObjectCannedACL (OPublicRead),
-                                                poACL, poContentType, putObject,
-                                                BucketName(BucketName),
-                                                ObjectKey(ObjectKey))
-import qualified Data.Conduit.Binary as CB
+import           Control.SingleRun
+import qualified Data.ByteString.Lazy          as L
+import qualified Data.Conduit.Binary           as CB
 import           Data.Conduit.Zlib             (WindowBits (WindowBits),
                                                 compress, ungzip)
+import           Data.Streaming.Network        (bindPortTCP)
+import           Database.Persist              (Entity (Entity))
 import qualified Hoogle
-import Control.SingleRun
-import qualified Data.ByteString.Lazy as L
---import System.FilePath (splitPath, takeDirectory)
-import System.Environment (getEnv)
-import Pantry (defaultHackageSecurityConfig)
-import Pantry.Types (PantryConfig(..), HpackExecutable(HpackBundled))
-import Path (parseAbsDir, toFilePath)
+import           Network.AWS                   (Credentials (Discover),
+                                                chunkedFile, defaultChunkSize,
+                                                envManager, newEnv, runAWS,
+                                                send)
+import           Network.AWS.Data.Body         (toBody)
+import           Network.AWS.S3                (BucketName (BucketName),
+                                                ObjectCannedACL (OPublicRead),
+                                                ObjectKey (ObjectKey), poACL,
+                                                poContentType, putObject)
+import           Network.HTTP.Client
+import           Network.HTTP.Client.Conduit   (bodyReaderSource)
+import           Network.HTTP.Types            (status200)
+import           RIO
+import           RIO.Directory
+import           RIO.FilePath
+import qualified RIO.Map                       as Map
+import           RIO.Process                   (mkDefaultProcessContext)
+import qualified RIO.Text                      as T
+import           Stackage.Database
+import           Stackage.Database.Types       (StackageCron (..))
+import           Stackage.PackageIndex.Conduit
+import           Web.PathPieces                (toPathPiece)
+import           Pantry                        (defaultHackageSecurityConfig)
+import           Pantry.Types                  (HpackExecutable (HpackBundled),
+                                                PantryConfig (..))
+import           Path                          (parseAbsDir, toFilePath)
+import           System.Environment            (getEnv)
 
 hoogleKey :: SnapName -> Text
 hoogleKey name = T.concat
@@ -89,15 +91,11 @@ newHoogleLocker env man = do
                 -- logDebug
                 return Nothing
 
+
 initStorage :: IO StackageDatabase
 initStorage = do
-    connstr <- getEnv "PGSTRING"
-
-    let dbfp = PostgresConf
-          { pgPoolSize = 5
-          , pgConnStr = encodeUtf8 $ T.pack connstr
-          }
-    openStackageDatabase dbfp
+    connstr <- encodeUtf8 . T.pack <$> getEnv "PGSTRING"
+    openStackageDatabase PostgresConf {pgPoolSize = 5, pgConnStr = connstr}
 
 
 stackageServerCron :: IO ()
@@ -113,7 +111,8 @@ stackageServerCron = do
     updateRef <- newMVar True
     cabalImmutable <- newIORef Map.empty
     cabalMutable <- newIORef Map.empty
-    withLogFunc lo $ \ logFunc ->
+    defaultProcessContext <- mkDefaultProcessContext
+    withLogFunc (setLogMinLevel LevelInfo lo) $ \ logFunc ->
       let pantryConfig = PantryConfig { pcHackageSecurity = defaultHackageSecurityConfig
                                       , pcHpackExecutable = HpackBundled
                                       , pcRootDir = pantryRootDir
@@ -123,12 +122,13 @@ stackageServerCron = do
                                       , pcParsedCabalFilesMutable = cabalMutable
                                       , pcConnectionCount = 1
                                       }
-          stackage = Stackage { sPantryConfig = pantryConfig
-                              , sStackageRoot = stackageRootDir
-                              , sLogFunc = logFunc }
+          stackage = StackageCron { scPantryConfig = pantryConfig
+                                  , scStackageRoot = stackageRootDir
+                                  , scProcessContext = defaultProcessContext
+                                  , scLogFunc = logFunc }
       in runRIO stackage runStackageUpdate
 
-runStackageUpdate :: RIO Stackage ()
+runStackageUpdate :: RIO StackageCron ()
 runStackageUpdate = do
     createStackageDatabase
 
