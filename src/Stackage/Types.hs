@@ -19,7 +19,6 @@ import Distribution.Types.PackageName (PackageName, mkPackageName)
 import Distribution.Version (Version)
 import Control.Monad.Catch (MonadThrow, throwM)
 import Data.Typeable (TypeRep, Typeable, typeOf)
-import Pantry.Types
 
 data BuildPlan = BuildPlan
   { bpSystemInfo :: !SystemInfo

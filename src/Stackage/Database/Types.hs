@@ -7,6 +7,7 @@ module Stackage.Database.Types
     , isNightly
     , StackageCron(..)
     , PantryHackageCabal(..)
+    , pantryHackageCabalToPackageIdentifierRevision
     , PantryTree(..)
     , PantryPackage(..)
     , SnapshotFile(..)
@@ -21,15 +22,14 @@ import           Data.Text.Read                 (decimal)
 import qualified Data.Text.Read                 as T (decimal)
 import           Database.Persist
 import           Database.Persist.Sql           hiding (LogFunc)
-import           Distribution.Types.PackageName (mkPackageName)
 import           Pantry.SHA256
 import           Pantry.Types
 import           RIO
 import           RIO.Process                    (HasProcessContext (..),
                                                  ProcessContext)
 import           RIO.Time
-import           Stackage.Types                 (simpleParse)
 import           Web.PathPieces
+import           Stackage.Types ()
 
 data SnapName = SNLts !Int !Int
               | SNNightly !Day
@@ -69,6 +69,9 @@ showSnapName :: SnapName -> Text
 showSnapName (SNLts x y) = T.concat ["lts-", T.pack (show x), ".", T.pack (show y)]
 showSnapName (SNNightly d) = "nightly-" <> T.pack (show d)
 
+instance Display SnapName where
+  display = display . showSnapName
+
 parseSnapName :: Text -> Maybe SnapName
 parseSnapName t0 = nightly <|> lts
   where
@@ -102,8 +105,8 @@ instance HasStorage StackageCron where
 
 
 data PantryHackageCabal = PantryHackageCabal
-  { phcPackageName    :: !PackageNameP
-  , phcPackageVersion :: !VersionP
+  { phcPackageName    :: !PackageName
+  , phcPackageVersion :: !Version
   , phcSHA256         :: !SHA256
   , phcFileSize       :: !FileSize
   } deriving Show
@@ -116,28 +119,36 @@ data PantryTree = PantryTree
 data PantryPackage =
   PantryHackagePackage !PantryHackageCabal !PantryTree
 
+pantryHackageCabalToPackageIdentifierRevision
+  :: PantryHackageCabal -> PackageIdentifierRevision
+pantryHackageCabalToPackageIdentifierRevision (PantryHackageCabal {..}) =
+    PackageIdentifierRevision phcPackageName phcPackageVersion (CFIHash phcSHA256 (Just phcFileSize))
+
 data SnapshotFile = SnapshotFile
   { sfName     :: !SnapName
   , sfCompiler :: !Text
   , sfPackages :: ![PantryPackage]
-  , sfHidden   :: !(Map PackageNameP Bool)
-  , sfFlags    :: !(Map PackageNameP (Map Text Bool))
+  , sfHidden   :: !(Map PackageName Bool)
+  , sfFlags    :: !(Map PackageName (Map Text Bool))
   }
 
 
 -- orphans, TODO: move to pantry
 
-instance FromJSON VersionP where
-    parseJSON = withText "VersionP" $ either (fail . show) (pure . VersionP) . simpleParse
-instance FromJSON PackageNameP where
-    parseJSON = withText "PackageNameP" $ pure . PackageNameP . mkPackageName . T.unpack
-instance FromJSONKey PackageNameP where
-    fromJSONKey = FromJSONKeyText $ PackageNameP . mkPackageName . T.unpack
+-- instance FromJSON VersionP where
+--     parseJSON = withText "VersionP" $ either (fail . show) (pure . VersionP) . simpleParse
+-- instance FromJSON PackageNameP where
+--     parseJSON = withText "PackageNameP" $ pure . PackageNameP . mkPackageName . T.unpack
+-- instance FromJSONKey PackageNameP where
+--     fromJSONKey = FromJSONKeyText $ PackageNameP . mkPackageName . T.unpack
 
-
+-- QUESTION: Potentially switch to `parsePackageIdentifierRevision`
 instance FromJSON PantryHackageCabal where
     parseJSON =
         withText "PantryHackageCabal" $ \txt -> do
+            -- PackageIdentifierRevision pn v (CFIHash sha (Just size)) <-
+            --     either (fail . displayException) pure $ parsePackageIdentifierRevision txt
+            -- return (PantryHackageCabal pn v sha size)
             let (packageTxt, hashWithSize) = T.break (== '@') txt
                 (hashTxtWithAlgo, sizeWithComma) = T.break (== ',') hashWithSize
             -- Split package identifier foo-bar-0.1.2 into package name and version
@@ -161,11 +172,13 @@ instance FromJSON PantryHackageCabal where
                     (T.stripPrefix "," sizeWithComma)
             return PantryHackageCabal {..}
 
+
 instance FromJSON PantryTree where
     parseJSON = withObject "PantryTree" $ \obj -> do
       ptSHA256 <- obj .: "sha256"
       ptFileSize <- obj .: "size"
       return PantryTree {..}
+
 
 instance FromJSON PantryPackage where
     parseJSON =
@@ -183,13 +196,13 @@ instance FromJSON SnapshotFile where
     return SnapshotFile {..}
 
 
-
 data PackageListingInfo = PackageListingInfo
     { pliName     :: !Text
     , pliVersion  :: !Text
     , pliSynopsis :: !Text
     , pliIsCore   :: !Bool
     } deriving Show
+
 
 instance ToJSON PackageListingInfo where
    toJSON PackageListingInfo{..} =
@@ -199,10 +212,12 @@ instance ToJSON PackageListingInfo where
               , "isCore"   .= pliIsCore
               ]
 
+
 data ModuleListingInfo = ModuleListingInfo
     { mliName           :: !Text
     , mliPackageVersion :: !Text
     } deriving Show
+
 
 data LatestInfo = LatestInfo
     { liSnapName :: !SnapName

@@ -85,14 +85,15 @@ import qualified Data.Aeson as A
 import Types (SnapshotBranch(..))
 import Data.Pool (destroyAllResources)
 import Data.List as L (stripPrefix, isPrefixOf)
-import Pantry.Types (Storage(Storage), HasStorage(storageG))
+import Pantry.Types (Storage(Storage), HasStorage(storageG), FileSize(..))
+import Pantry.SHA256 (SHA256(..))
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
 import Pantry.Hackage (updateHackageIndex, DidUpdateOccur(..))
 import Control.Monad.Trans.Class (lift)
 
 currentSchema :: Int
-currentSchema = 1 -- TODO: change to 2
+currentSchema = 2 -- TODO: change to 2
 
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
 Schema
@@ -138,9 +139,10 @@ SnapshotPackage
 SnapshotHackagePackage
     snapshot SnapshotId
     cabal HackageCabalId
-    package HackageTarballId
     isHidden Bool default=False
-    UniqueSnapshotHackagePackage snapshot package
+    pantryTreeSha256 SHA256
+    pantryTreeSize FileSize
+    UniqueSnapshotHackagePackage snapshot cabal
 Module
     package SnapshotPackageId
     name Text
@@ -194,9 +196,7 @@ instance HasStorage env => GetStackageDatabase env (RIO env) where
     getStackageDatabase = view storageG
 
 sourceSnapshots
-  :: (MonadReader env m, MonadReader StackageCron (t m),
-      HasLogFunc env, HasProcessContext env, MonadResource (t m), MonadTrans t, MonadIO m) =>
-     ConduitT a (SnapshotFile, Day, UTCTime) (t m) ()
+  :: ConduitT a (SnapshotFile, Day, UTCTime) (ResourceT (RIO StackageCron)) ()
 sourceSnapshots = do
     rootDir <- scStackageRoot <$> lift ask
     gitDir <- lift $ cloneOrUpdate rootDir "commercialhaskell" "stackage-snapshots"
@@ -254,17 +254,58 @@ sourceSnapshots = do
                     logError
                         ("Couldn't parse the filepath into an Nightly date: " <> display (T.pack fp))
                 return Nothing
-  --   let docdir = dir </> "docs"
-  --   whenM (liftIO $ doesDirectoryExist docdir) $
-  --       sourceDirectory docdir .| concatMapMC (go Right . fromString)
-  -- where
-  --   go wrapper fp | Just name <- nameFromFP fp = liftIO $ do
-  --       let bp = decodeFileEither fp >>= either throwIO return
-  --       return $ Just (name, fp, wrapper bp)
-  --   go _ _ = return Nothing
-  --   nameFromFP fp = do
-  --       base <- T.stripSuffix ".yaml" $ T.pack $ takeFileName fp
-  --       fromPathPiece base
+
+
+
+updateSnapshot :: (HasStorage env, HasLogFunc env) => (SnapshotFile, Day, UTCTime) -> RIO env ()
+updateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
+    let runUpdate = do
+            mSnapshotKey <- insertUnique (Snapshot sfName sfCompiler createdOn updatedOn)
+            case mSnapshotKey of
+                Just snapshotKey -> do
+                    case sfName of
+                        SNLts major minor -> insert_ $ Lts snapshotKey major minor
+                        SNNightly day -> insert_ $ Nightly snapshotKey day
+                    msgs <-
+                        forMaybeM sfPackages $ \(PantryHackagePackage phc PantryTree {..}) -> do
+                            let packageIdentifierRevision =
+                                    pantryHackageCabalToPackageIdentifierRevision phc
+                            mHackageCabalKey <- getHackageCabalKey packageIdentifierRevision
+                            case mHackageCabalKey of
+                                Nothing ->
+                                    let msg =
+                                            "Couldn't find hackage cabal file " <>
+                                            "in pantry corresponding to: " <>
+                                            display packageIdentifierRevision
+                                     in return $ Just (LevelError, msg)
+                                Just hackageCabalKey -> do
+                                    let PantryHackageCabal packageName _ _ _ = phc
+                                        isHidden = fromMaybe False $ Map.lookup packageName sfHidden
+                                    insert_ $
+                                        SnapshotHackagePackage
+                                            snapshotKey
+                                            hackageCabalKey
+                                            isHidden
+                                            ptSHA256
+                                            ptFileSize
+                                    return Nothing
+                    return $
+                        if null msgs
+                            then [ ( LevelInfo
+                                   , "Added snapshot '" <> display sfName <> "' successfully")
+                                 ]
+                            else [ ( LevelError
+                                   , "There were errors while adding snapshot '" <> display sfName <>
+                                     "'")
+                                 ] ++
+                                 msgs
+                Nothing ->
+                    return
+                        [ ( LevelInfo
+                          , "Snapshot with name: " <> display sfName <> " already exists.")
+                        ]
+    msgs <- withStorage runUpdate
+    mapM_ (uncurry $ logGeneric "") msgs
 
 -- sourceBuildPlans :: MonadResource m => FilePath -> ConduitT i (SnapName, FilePath, Either (IO BuildPlan) (IO DocMap)) m ()
 -- sourceBuildPlans root = do
@@ -337,14 +378,14 @@ createStackageDatabase = do
         NoUpdateOccurred -> logInfo "No new packages in hackage index"
     logWarn "FIXME: update stackage snapshots repos"
     runConduitRes $
-        sourceSnapshots .| --updateSnapshot
-        mapM_C
-            (\(snap, createdOn, updatedOn) ->
-                 lift $
-                 logInfo $
-                 "Parsed: " <> displayShow (sfName snap) <> " createdOn: " <> displayShow createdOn <>
-                 " updatedOn: " <>
-                 displayShow updatedOn)
+        sourceSnapshots .|
+        mapM_C (lift . updateSnapshot)
+            -- (\(snap, _createdOn, _updatedOn) ->
+            --      lift $
+            --      logInfo $
+            --      "Parsed: " <> displayShow (sfName snap) <> " with: " <>
+            --      displayShow (length (sfPackages snap)) <>
+            --      " number of packages")
         -- sourceBuildPlans rootDir .|
         -- mapM_C
         --     (\(sname, fp', eval) ->
