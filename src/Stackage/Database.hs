@@ -37,7 +37,6 @@ module Stackage.Database
     , Package (..)
     , getPackage
     , prettyName
-    , prettyNameShort
     , getSnapshotsForPackage
     , getSnapshots
     , countSnapshots
@@ -59,10 +58,11 @@ import qualified RIO.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.ByteString.Char8 as BS8
 import RIO.FilePath
-import RIO.Directory (removeFile, getAppUserDataDirectory, doesDirectoryExist, createDirectoryIfMissing)
+import RIO.Directory (doesDirectoryExist)
+--, removeFile, getAppUserDataDirectory, createDirectoryIfMissing)
 import Conduit
-import qualified Data.Conduit.List as CL
-import Web.PathPieces (toPathPiece)
+-- import qualified Data.Conduit.List as CL
+-- import Web.PathPieces (toPathPiece)
 import qualified Codec.Archive.Tar as Tar
 import Database.Esqueleto.Internal.Language (From)
 import CMarkGFM
@@ -73,8 +73,8 @@ import Yesod.Form.Fields (Textarea (..))
 import Stackage.Database.Types
 import Stackage.Types
 import Stackage.Metadata
-import Stackage.PackageIndex.Conduit
-import Web.PathPieces (fromPathPiece)
+-- import Stackage.PackageIndex.Conduit
+-- import Web.PathPieces (fromPathPiece)
 import Data.Yaml (decodeFileEither, decodeEither', decodeThrow)
 import Database.Persist
 import Database.Persist.Postgresql
@@ -84,29 +84,25 @@ import qualified Database.Esqueleto as E
 import qualified Data.Aeson as A
 import Types (SnapshotBranch(..))
 import Data.Pool (destroyAllResources)
-import Data.List as L (stripPrefix, isPrefixOf)
-import Pantry.Types (Storage(Storage), HasStorage(storageG), FileSize(..))
-import Pantry.SHA256 (SHA256(..))
+import Data.List as L (isPrefixOf)
+import Pantry.Types (VersionP(..), Storage(Storage), HasStorage(storageG), FileSize(..), BlobKey(..))
+import Pantry.SHA256 (SHA256)
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
 import Pantry.Hackage (updateHackageIndex, DidUpdateOccur(..))
 import Control.Monad.Trans.Class (lift)
 
 currentSchema :: Int
-currentSchema = 2 -- TODO: change to 2
+currentSchema = 2
 
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
 Schema
     val Int
     deriving Show
-Imported
-    name SnapName
-    type Text
-    UniqueImported name type
 
 Snapshot
     name SnapName
-    ghc Text
+    compiler Compiler
     created Day
     updatedOn UTCTime
     UniqueSnapshot name
@@ -140,8 +136,6 @@ SnapshotHackagePackage
     snapshot SnapshotId
     cabal HackageCabalId
     isHidden Bool default=False
-    pantryTreeSha256 SHA256
-    pantryTreeSize FileSize
     UniqueSnapshotHackagePackage snapshot cabal
 Module
     package SnapshotPackageId
@@ -162,16 +156,17 @@ Deprecated
 
 instance A.ToJSON Snapshot where
   toJSON Snapshot{..} =
-    A.object [ "name"    A..= snapshotName
-             , "ghc"     A..= snapshotGhc
-             , "created" A..= formatTime defaultTimeLocale "%F" snapshotCreated
+    A.object [ "name"     A..= snapshotName
+             , "ghc"      A..= VersionP ghc -- TODO: deprecate
+             , "compiler" A..= snapshotCompiler
+             , "created"  A..= formatTime defaultTimeLocale "%F" snapshotCreated
              ]
+    where CompilerGHC ghc = snapshotCompiler
 
 _hideUnusedWarnings
     :: ( SnapshotPackageId
        , SnapshotHackagePackageId
        , SchemaId
-       , ImportedId
        , LtsId
        , NightlyId
        , ModuleId
@@ -252,60 +247,50 @@ sourceSnapshots = do
             _ -> do
                 lift $
                     logError
-                        ("Couldn't parse the filepath into an Nightly date: " <> display (T.pack fp))
+                        ("Couldn't parse the filepath into a Nightly date: " <> display (T.pack fp))
                 return Nothing
 
 
 
-updateSnapshot :: (HasStorage env, HasLogFunc env) => (SnapshotFile, Day, UTCTime) -> RIO env ()
-updateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
-    let runUpdate = do
-            mSnapshotKey <- insertUnique (Snapshot sfName sfCompiler createdOn updatedOn)
-            case mSnapshotKey of
-                Just snapshotKey -> do
-                    case sfName of
-                        SNLts major minor -> insert_ $ Lts snapshotKey major minor
-                        SNNightly day -> insert_ $ Nightly snapshotKey day
-                    msgs <-
-                        forMaybeM sfPackages $ \(PantryHackagePackage phc PantryTree {..}) -> do
-                            let packageIdentifierRevision =
-                                    pantryHackageCabalToPackageIdentifierRevision phc
-                            mHackageCabalKey <- getHackageCabalKey packageIdentifierRevision
-                            case mHackageCabalKey of
-                                Nothing ->
-                                    let msg =
-                                            "Couldn't find hackage cabal file " <>
-                                            "in pantry corresponding to: " <>
-                                            display packageIdentifierRevision
-                                     in return $ Just (LevelError, msg)
-                                Just hackageCabalKey -> do
-                                    let PantryHackageCabal packageName _ _ _ = phc
-                                        isHidden = fromMaybe False $ Map.lookup packageName sfHidden
-                                    insert_ $
-                                        SnapshotHackagePackage
-                                            snapshotKey
-                                            hackageCabalKey
-                                            isHidden
-                                            ptSHA256
-                                            ptFileSize
-                                    return Nothing
-                    return $
-                        if null msgs
-                            then [ ( LevelInfo
-                                   , "Added snapshot '" <> display sfName <> "' successfully")
-                                 ]
-                            else [ ( LevelError
-                                   , "There were errors while adding snapshot '" <> display sfName <>
-                                     "'")
-                                 ] ++
-                                 msgs
-                Nothing ->
-                    return
-                        [ ( LevelInfo
-                          , "Snapshot with name: " <> display sfName <> " already exists.")
-                        ]
-    msgs <- withStorage runUpdate
-    mapM_ (uncurry $ logGeneric "") msgs
+createOrUpdateSnapshot :: (SnapshotFile, Day, UTCTime) -> ReaderT SqlBackend (RIO StackageCron) ()
+createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
+    mSnapshotKey <- insertUnique (Snapshot sfName sfCompiler createdOn updatedOn)
+    case mSnapshotKey of
+        Just snapshotKey -> do
+            case sfName of
+                SNLts major minor -> insert_ $ Lts snapshotKey major minor
+                SNNightly day -> insert_ $ Nightly snapshotKey day
+            hasErrs <-
+                forM sfPackages $ \(PantryHackagePackage phc PantryTree {..}) -> do
+                    let packageIdentifierRevision =
+                            pantryHackageCabalToPackageIdentifierRevision phc
+                    mHackageCabalKey <- getHackageCabalKey packageIdentifierRevision
+                    mCabalBlob <- loadBlob (BlobKey ptSHA256 ptFileSize)
+                    case (,) <$> mHackageCabalKey <*> mCabalBlob of
+                        Nothing -> do
+                            lift $
+                                logError $
+                                "Couldn't find hackage cabal file " <>
+                                "in pantry corresponding to: " <>
+                                display packageIdentifierRevision
+                            return True
+                        Just (hackageCabalKey, cabalBlob) -> do
+                            let PantryHackageCabal packageName _ _ _ = phc
+                                isHidden = fromMaybe False $ Map.lookup packageName sfHidden
+                            insert_ $
+                                SnapshotHackagePackage
+                                    snapshotKey
+                                    hackageCabalKey
+                                    isHidden
+                            return False
+            lift $
+                if or hasErrs
+                    then logError $
+                         "There were errors while adding snapshot '" <> display sfName <> "'"
+                    else logInfo $ "Added snapshot '" <> display sfName <> "' successfully"
+        Nothing -> do
+            lift $ logInfo $ "Snapshot with name: " <> display sfName <> " already exists."
+
 
 -- sourceBuildPlans :: MonadResource m => FilePath -> ConduitT i (SnapName, FilePath, Either (IO BuildPlan) (IO DocMap)) m ()
 -- sourceBuildPlans root = do
@@ -376,10 +361,9 @@ createStackageDatabase = do
     case didUpdate of
         UpdateOccurred -> logInfo "Updated hackage index"
         NoUpdateOccurred -> logInfo "No new packages in hackage index"
-    logWarn "FIXME: update stackage snapshots repos"
     runConduitRes $
         sourceSnapshots .|
-        mapM_C (lift . updateSnapshot)
+        mapM_C (lift . withStorage . createOrUpdateSnapshot)
             -- (\(snap, _createdOn, _updatedOn) ->
             --      lift $
             --      logInfo $
@@ -624,13 +608,11 @@ lookupSnapshot :: GetStackageDatabase env m => SnapName -> m (Maybe (Entity Snap
 lookupSnapshot name = run $ getBy $ UniqueSnapshot name
 
 snapshotTitle :: Snapshot -> Text
-snapshotTitle s = prettyName (snapshotName s) (snapshotGhc s)
+snapshotTitle s =
+    T.concat [prettyName (snapshotName s), " (", displayCompiler (snapshotCompiler s), ")"]
 
-prettyName :: SnapName -> Text -> Text
-prettyName name ghc = T.concat [prettyNameShort name, " (ghc-", ghc, ")"]
-
-prettyNameShort :: SnapName -> Text
-prettyNameShort name =
+prettyName :: SnapName -> Text
+prettyName name =
     case name of
         SNLts x y -> T.concat ["LTS Haskell ", T.pack (show x), ".", T.pack (show y)]
         SNNightly d -> "Stackage Nightly " <> T.pack (show d)
@@ -792,7 +774,7 @@ latestHelper pname requireDocs clause order = do
     E.limit 1
     return
         ( s E.^. SnapshotName
-        , s E.^. SnapshotGhc
+        , s E.^. SnapshotCompiler
         , sp E.^. SnapshotPackageVersion
         , sp E.^. SnapshotPackageId
         )
@@ -805,10 +787,9 @@ latestHelper pname requireDocs clause order = do
         [] -> return []
     else return $ map toLatest results
   where
-    toLatest (E.Value sname, E.Value ghc, E.Value version, _) = LatestInfo
+    toLatest (E.Value sname, _, E.Value version, _) = LatestInfo
         { liSnapName = sname
         , liVersion = version
-        , liGhc = ghc
         }
 
 getDeps :: GetStackageDatabase env m => Text -> Maybe Int -> m [(Text, Text)]
@@ -943,17 +924,26 @@ getPackageCount sid = run $ count [SnapshotPackageSnapshot ==. sid]
 
 getLatestLtsByGhc :: GetStackageDatabase env m
                   => m [(Int, Int, Text, Day)]
-getLatestLtsByGhc = run $ fmap (dedupe . map toTuple) $ do
-    E.select $ E.from $ \(lts `E.InnerJoin` snapshot) -> do
-        E.on $ lts E.^. LtsSnap E.==. snapshot E.^. SnapshotId
-        E.orderBy [E.desc (lts E.^. LtsMajor), E.desc (lts E.^. LtsMinor)]
-        E.groupBy (snapshot E.^. SnapshotGhc, lts E.^. LtsId, lts E.^. LtsMajor, lts E.^. LtsMinor, snapshot E.^. SnapshotId)
-        return (lts, snapshot)
+getLatestLtsByGhc =
+    run $
+    fmap (dedupe . map toTuple) $ do
+        E.select $
+            E.from $ \(lts `E.InnerJoin` snapshot) -> do
+                E.on $ lts E.^. LtsSnap E.==. snapshot E.^. SnapshotId
+                E.orderBy [E.desc (lts E.^. LtsMajor), E.desc (lts E.^. LtsMinor)]
+                E.groupBy
+                    ( snapshot E.^. SnapshotCompiler
+                    , lts E.^. LtsId
+                    , lts E.^. LtsMajor
+                    , lts E.^. LtsMinor
+                    , snapshot E.^. SnapshotId)
+                return (lts, snapshot)
   where
     toTuple (Entity _ lts, Entity _ snapshot) =
-        (ltsMajor lts, ltsMinor lts, snapshotGhc snapshot, snapshotCreated snapshot)
-
+        ( ltsMajor lts
+        , ltsMinor lts
+        , displayCompiler (snapshotCompiler snapshot)
+        , snapshotCreated snapshot)
     dedupe [] = []
     dedupe (x:xs) = x : dedupe (dropWhile (\y -> thd x == thd y) xs)
-
     thd (_, _, x, _) = x

@@ -27,7 +27,7 @@ mkFeed mBranch snaps = do
         return FeedEntry
             { feedEntryLink = SnapshotR (snapshotName snap) StackageHomeR
             , feedEntryUpdated = UTCTime (snapshotCreated snap) 0
-            , feedEntryTitle = prettyName (snapshotName snap) (snapshotGhc snap)
+            , feedEntryTitle = snapshotTitle snap
             , feedEntryContent = content
             , feedEntryEnclosure = Nothing
             }
@@ -62,7 +62,7 @@ getContent sid2 snap = do
             let name2 = snapshotName snap
             withUrlRenderer
                 [hamlet|
-                  <p>Difference between #{prettyNameShort name1} and #{prettyNameShort $ snapshotName snap}
+                  <p>Difference between #{prettyName name1} and #{prettyName $ snapshotName snap}
                   <table border=1 cellpadding=5>
                     <thead>
                       <tr>

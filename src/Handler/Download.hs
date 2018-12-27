@@ -12,6 +12,8 @@ import Data.GhcLinks
 import Yesod.GitRepo (grContent)
 import Stackage.Database
 import qualified Data.Text as T
+import Stackage.Types (dtDisplay)
+import Stackage.Database.Types (ghcVersion)
 
 getDownloadR :: Handler Html
 getDownloadR = track "Hoogle.Download.getDownloadR" $
@@ -28,7 +30,7 @@ getDownloadLtsSnapshotsJsonR = track "Hoogle.Download.getDownloadLtsSnapshotsJso
 -- Print the ghc major version for the given snapshot.
 ghcMajorVersionText :: Snapshot -> Text
 ghcMajorVersionText =
-    getMajorVersion . snapshotGhc
+    getMajorVersion . dtDisplay . ghcVersion . snapshotCompiler
   where
     getMajorVersion :: Text -> Text
     getMajorVersion = intercalate "." . take 2 . T.splitOn "."

@@ -33,7 +33,7 @@ $newline never
                  <tr>
                    <td align="right">
                      <a href=@{SnapshotR (liSnapName li) StackageHomeR}>
-                        #{prettyNameShort (liSnapName li)}
+                        #{prettyName (liSnapName li)}
                      :
                    <td>
                      <span .version>

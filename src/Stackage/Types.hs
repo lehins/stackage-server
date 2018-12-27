@@ -56,7 +56,7 @@ instance FromJSON PackageDocs where
         <$> o .: "version"
         <*> o .: "modules"
 
-dtDisplay :: DT.Text a => a -> Text
+dtDisplay :: (DT.Text a, IsString b) => a -> b
 dtDisplay = fromString . DT.display
 
 data ParseFailedException = ParseFailedException TypeRep Text

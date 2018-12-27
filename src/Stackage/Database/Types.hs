@@ -1,10 +1,12 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Stackage.Database.Types
     ( SnapName (..)
     , isLts
     , isNightly
+    , Compiler(..)
+    , displayCompiler
+    , parseCompiler
     , StackageCron(..)
     , PantryHackageCabal(..)
     , pantryHackageCabalToPackageIdentifierRevision
@@ -16,20 +18,20 @@ module Stackage.Database.Types
     , LatestInfo(..)
     ) where
 
+import           Data.Bifunctor       (bimap)
 import           Data.Aeson
-import qualified Data.Text                      as T
-import           Data.Text.Read                 (decimal)
-import qualified Data.Text.Read                 as T (decimal)
+import qualified Data.Text            as T
+import           Data.Text.Read       (decimal)
+import qualified Data.Text.Read       as T (decimal)
 import           Database.Persist
-import           Database.Persist.Sql           hiding (LogFunc)
+import           Database.Persist.Sql hiding (LogFunc)
 import           Pantry.SHA256
 import           Pantry.Types
 import           RIO
-import           RIO.Process                    (HasProcessContext (..),
-                                                 ProcessContext)
+import           RIO.Process          (HasProcessContext (..), ProcessContext)
 import           RIO.Time
+import           Stackage.Types       (dtDisplay)
 import           Web.PathPieces
-import           Stackage.Types ()
 
 data SnapName = SNLts !Int !Int
               | SNNightly !Day
@@ -119,36 +121,60 @@ data PantryTree = PantryTree
 data PantryPackage =
   PantryHackagePackage !PantryHackageCabal !PantryTree
 
+-- | Convert a pantry representation for hackage cabal package.
 pantryHackageCabalToPackageIdentifierRevision
   :: PantryHackageCabal -> PackageIdentifierRevision
 pantryHackageCabalToPackageIdentifierRevision (PantryHackageCabal {..}) =
     PackageIdentifierRevision phcPackageName phcPackageVersion (CFIHash phcSHA256 (Just phcFileSize))
 
+newtype Compiler =
+    CompilerGHC { ghcVersion :: Version }
+    deriving (Eq)
+
+instance Show Compiler where
+  show = displayCompiler
+
+displayCompiler :: (Monoid a, IsString a) => Compiler -> a
+displayCompiler (CompilerGHC vghc) = "ghc-" <> dtDisplay vghc
+
+parseCompiler :: Text -> Either String Compiler
+parseCompiler txt =
+    case T.stripPrefix "ghc-" txt of
+        Just vTxt -> bimap displayException CompilerGHC $ parseVersionThrowing (T.unpack vTxt)
+        Nothing -> Left $ "Invalid prefix for compiler: " <> T.unpack txt
+
+
+instance Display Compiler where
+    display = displayCompiler
+instance ToJSON Compiler where
+    toJSON = String . displayCompiler
+instance FromJSON Compiler where
+    parseJSON = withText "Compiler" (either fail return .  parseCompiler)
+instance PersistField Compiler where
+    toPersistValue = PersistText . displayCompiler
+    fromPersistValue v = fromPersistValue v >>= mapLeft T.pack . parseCompiler
+instance PersistFieldSql Compiler where
+    sqlType _ = SqlString
+
+
 data SnapshotFile = SnapshotFile
-  { sfName     :: !SnapName
-  , sfCompiler :: !Text
-  , sfPackages :: ![PantryPackage]
-  , sfHidden   :: !(Map PackageName Bool)
-  , sfFlags    :: !(Map PackageName (Map Text Bool))
-  }
+    { sfName     :: !SnapName
+    , sfCompiler :: !Compiler
+    , sfPackages :: ![PantryPackage]
+    , sfHidden   :: !(Map PackageName Bool)
+    , sfFlags    :: !(Map PackageName (Map Text Bool))
+    }
 
-
--- orphans, TODO: move to pantry
-
--- instance FromJSON VersionP where
---     parseJSON = withText "VersionP" $ either (fail . show) (pure . VersionP) . simpleParse
--- instance FromJSON PackageNameP where
---     parseJSON = withText "PackageNameP" $ pure . PackageNameP . mkPackageName . T.unpack
--- instance FromJSONKey PackageNameP where
---     fromJSONKey = FromJSONKeyText $ PackageNameP . mkPackageName . T.unpack
-
--- QUESTION: Potentially switch to `parsePackageIdentifierRevision`
+-- QUESTION: Potentially switch to `parsePackageIdentifierRevision`:
+   -- PackageIdentifierRevision pn v (CFIHash sha (Just size)) <-
+   --     either (fail . displayException) pure $ parsePackageIdentifierRevision txt
+   -- return (PantryHackageCabal pn v sha size)
+-- Issues with such switch:
+-- * CFILatest and CFIRevision do not make sense in stackage-snapshots
+-- * Current implementation is faster
 instance FromJSON PantryHackageCabal where
     parseJSON =
         withText "PantryHackageCabal" $ \txt -> do
-            -- PackageIdentifierRevision pn v (CFIHash sha (Just size)) <-
-            --     either (fail . displayException) pure $ parsePackageIdentifierRevision txt
-            -- return (PantryHackageCabal pn v sha size)
             let (packageTxt, hashWithSize) = T.break (== '@') txt
                 (hashTxtWithAlgo, sizeWithComma) = T.break (== ',') hashWithSize
             -- Split package identifier foo-bar-0.1.2 into package name and version
@@ -187,13 +213,14 @@ instance FromJSON PantryPackage where
 
 
 instance FromJSON SnapshotFile where
-  parseJSON = withObject "SnapshotFile" $ \obj -> do
-    sfName <- obj .: "name"
-    sfCompiler <- obj .: "compiler"
-    sfPackages <- obj .: "packages"
-    sfHidden <- obj .:? "hidden" .!= mempty
-    sfFlags <- obj .:? "flags" .!= mempty
-    return SnapshotFile {..}
+    parseJSON =
+        withObject "SnapshotFile" $ \obj -> do
+            sfName <- obj .: "name"
+            sfCompiler <- obj .: "compiler"
+            sfPackages <- obj .: "packages"
+            sfHidden <- obj .:? "hidden" .!= mempty
+            sfFlags <- obj .:? "flags" .!= mempty
+            return SnapshotFile {..}
 
 
 data PackageListingInfo = PackageListingInfo
@@ -205,12 +232,13 @@ data PackageListingInfo = PackageListingInfo
 
 
 instance ToJSON PackageListingInfo where
-   toJSON PackageListingInfo{..} =
-       object [ "name"     .= pliName
-              , "version"  .= pliVersion
-              , "synopsis" .= pliSynopsis
-              , "isCore"   .= pliIsCore
-              ]
+    toJSON PackageListingInfo {..} =
+        object
+            [ "name" .= pliName
+            , "version" .= pliVersion
+            , "synopsis" .= pliSynopsis
+            , "isCore" .= pliIsCore
+            ]
 
 
 data ModuleListingInfo = ModuleListingInfo
@@ -222,5 +250,4 @@ data ModuleListingInfo = ModuleListingInfo
 data LatestInfo = LatestInfo
     { liSnapName :: !SnapName
     , liVersion  :: !Text
-    , liGhc      :: !Text
     } deriving (Show, Eq, Ord)
