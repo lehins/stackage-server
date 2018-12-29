@@ -11,7 +11,8 @@ module Distribution.Package.ModuleForest
 
 import           Distribution.ModuleName (ModuleName)
 import qualified Distribution.ModuleName as ModuleName
-import           Import
+import           RIO
+import           RIO.Text (pack, unpack)
 
 type NameComponent = Text
 

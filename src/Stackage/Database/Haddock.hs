@@ -10,8 +10,8 @@ import Documentation.Haddock.Types (DocH (..), Hyperlink (..), Picture (..), Hea
 import ClassyPrelude.Conduit
 import Text.Blaze.Html (Html, toHtml)
 
-renderHaddock :: Text -> Html
-renderHaddock = hToHtml . Haddock.toRegular . _doc . Haddock.parseParas . unpack
+renderHaddock :: String -> Html
+renderHaddock = hToHtml . Haddock.toRegular . _doc . Haddock.parseParas
 
 -- | Convert a Haddock doc to HTML.
 hToHtml :: DocH String String -> Html

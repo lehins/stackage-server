@@ -65,6 +65,9 @@ import Conduit
 -- import Web.PathPieces (toPathPiece)
 import qualified Codec.Archive.Tar as Tar
 import Database.Esqueleto.Internal.Language (From)
+import Distribution.PackageDescription (GenericPackageDescription)
+import Distribution.PackageDescription.Parsec
+       (parseGenericPackageDescription, runParseResult)
 import CMarkGFM
 import Stackage.Database.Haddock
 import System.FilePath (takeBaseName, takeExtension)
@@ -85,7 +88,14 @@ import qualified Data.Aeson as A
 import Types (SnapshotBranch(..))
 import Data.Pool (destroyAllResources)
 import Data.List as L (isPrefixOf)
-import Pantry.Types (VersionP(..), Storage(Storage), HasStorage(storageG), FileSize(..), BlobKey(..))
+import Pantry.Types
+    ( BlobKey(..)
+    , FileSize(..)
+    , HasStorage(storageG)
+    , PackageNameP(..)
+    , Storage(Storage)
+    , VersionP(..)
+    )
 import Pantry.SHA256 (SHA256)
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
@@ -141,6 +151,10 @@ Module
     package SnapshotPackageId
     name Text
     UniqueModule package name
+HackageDep
+    user HackageCabalId
+    uses PackageNameId
+    range Text
 Dep
     user PackageId
     uses Text -- avoid circular dependency issue when loading database
@@ -171,6 +185,7 @@ _hideUnusedWarnings
        , NightlyId
        , ModuleId
        , DepId
+       , HackageDepId
        , DeprecatedId
        ) -> ()
 _hideUnusedWarnings _ = ()
@@ -250,8 +265,6 @@ sourceSnapshots = do
                         ("Couldn't parse the filepath into a Nightly date: " <> display (T.pack fp))
                 return Nothing
 
-
-
 createOrUpdateSnapshot :: (SnapshotFile, Day, UTCTime) -> ReaderT SqlBackend (RIO StackageCron) ()
 createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
     mSnapshotKey <- insertUnique (Snapshot sfName sfCompiler createdOn updatedOn)
@@ -264,24 +277,27 @@ createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
                 forM sfPackages $ \(PantryHackagePackage phc PantryTree {..}) -> do
                     let packageIdentifierRevision =
                             pantryHackageCabalToPackageIdentifierRevision phc
+                        PantryHackageCabal packageName _ _ _ = phc
                     mHackageCabalKey <- getHackageCabalKey packageIdentifierRevision
-                    mCabalBlob <- loadBlob (BlobKey ptSHA256 ptFileSize)
-                    case (,) <$> mHackageCabalKey <*> mCabalBlob of
+                    --mCabalBlob <- loadBlob (BlobKey ptSHA256 ptFileSize)
+                    --mCabalFile <- lift $ maybe (return Nothing) (parseCabalBlob packageName) mCabalBlob
+                    --mCabalFile <- lift (join <$> mapM (parseCabalBlob packageName) mCabalBlob)
+                    case mHackageCabalKey of -- (,) <$> mHackageCabalKey <*> mCabalFile of
                         Nothing -> do
                             lift $
                                 logError $
-                                "Couldn't find hackage cabal file " <>
+                                "Couldn't find a valid hackage cabal file " <>
                                 "in pantry corresponding to: " <>
                                 display packageIdentifierRevision
                             return True
-                        Just (hackageCabalKey, cabalBlob) -> do
-                            let PantryHackageCabal packageName _ _ _ = phc
-                                isHidden = fromMaybe False $ Map.lookup packageName sfHidden
+                        Just hackageCabalKey -> do
+                            let isHidden = fromMaybe False $ Map.lookup packageName sfHidden
                             insert_ $
                                 SnapshotHackagePackage
                                     snapshotKey
                                     hackageCabalKey
                                     isHidden
+                            --updateDeps hackageCabalKey pggpd
                             return False
             lift $
                 if or hasErrs
@@ -291,6 +307,7 @@ createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
         Nothing -> do
             lift $ logInfo $ "Snapshot with name: " <> display sfName <> " already exists."
 
+--getPackageInfo snapshot packageName mVersion
 
 -- sourceBuildPlans :: MonadResource m => FilePath -> ConduitT i (SnapName, FilePath, Either (IO BuildPlan) (IO DocMap)) m ()
 -- sourceBuildPlans root = do
@@ -309,6 +326,10 @@ createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
 --     nameFromFP fp = do
 --         base <- T.stripSuffix ".yaml" $ T.pack $ takeFileName fp
 --         fromPathPiece base
+-- updateDeps hackageCabalKey gpd = do
+--     let deps = extractDependencies gpd
+--     insert_ $ HackageDep hackageCabalKey $ extractDeps gpd
+--     return ()
 
 cloneOrUpdate ::
        (MonadReader env m, HasLogFunc env, HasProcessContext env, MonadIO m)
@@ -417,52 +438,52 @@ getPackageId x = do
             , packageLicenseName = ""
             }
 
-addPackage :: HasLogFunc env => Tar.Entry -> SqlPersistT (RIO env) ()
-addPackage e =
-    case ("packages/" `L.isPrefixOf` fp && takeExtension fp == ".yaml", Tar.entryContent e) of
-        (True, Tar.NormalFile lbs _) ->
-          case decodeEither' $ LBS.toStrict lbs of
-            Left err ->
-              lift $ logInfo $ "ERROR: Could not parse " <>
-                  displayShow fp <> ": " <> displayShow err
-            Right pi -> onParse pi
-        _ -> return ()
-  where
-    onParse pi = do
-            let p = Package
-                    { packageName = T.pack base
-                    , packageLatest = dtDisplay $ piLatest pi
-                    , packageSynopsis = piSynopsis pi
-                    , packageDescription = renderContent (piDescription pi) (piDescriptionType pi)
-                    , packageChangelog = renderContent (piChangeLog pi) (piChangeLogType pi)
-                    , packageAuthor = piAuthor pi
-                    , packageMaintainer = piMaintainer pi
-                    , packageHomepage = piHomepage pi
-                    , packageLicenseName = piLicenseName pi
-                    }
+-- addPackage :: HasLogFunc env => Tar.Entry -> SqlPersistT (RIO env) ()
+-- addPackage e =
+--     case ("packages/" `L.isPrefixOf` fp && takeExtension fp == ".yaml", Tar.entryContent e) of
+--         (True, Tar.NormalFile lbs _) ->
+--           case decodeEither' $ LBS.toStrict lbs of
+--             Left err ->
+--               lift $ logInfo $ "ERROR: Could not parse " <>
+--                   displayShow fp <> ": " <> displayShow err
+--             Right pi -> onParse pi
+--         _ -> return ()
+--   where
+--     onParse pi = do
+--             let p = Package
+--                     { packageName = T.pack base
+--                     , packageLatest = dtDisplay $ piLatest pi
+--                     , packageSynopsis = piSynopsis pi
+--                     , packageDescription = renderContent (piDescription pi) (piDescriptionType pi)
+--                     , packageChangelog = renderContent (piChangeLog pi) (piChangeLogType pi)
+--                     , packageAuthor = piAuthor pi
+--                     , packageMaintainer = piMaintainer pi
+--                     , packageHomepage = piHomepage pi
+--                     , packageLicenseName = piLicenseName pi
+--                     }
 
-            mp <- getBy $ UniquePackage $ packageName p
-            pid <- case mp of
-                Just (Entity pid _) -> do
-                    replace pid p
-                    return pid
-                Nothing -> insert p
-            deleteWhere [DepUser ==. pid]
-            forM_ (Map.toList $ piBasicDeps pi) $ \(uses, range) -> insert_ Dep
-                { depUser = pid
-                , depUses = dtDisplay uses
-                , depRange = dtDisplay range
-                }
+--             mp <- getBy $ UniquePackage $ packageName p
+--             pid <- case mp of
+--                 Just (Entity pid _) -> do
+--                     replace pid p
+--                     return pid
+--                 Nothing -> insert p
+--             deleteWhere [DepUser ==. pid]
+--             forM_ (Map.toList $ piBasicDeps pi) $ \(uses, range) -> insert_ Dep
+--                 { depUser = pid
+--                 , depUses = dtDisplay uses
+--                 , depRange = dtDisplay range
+--                 }
 
-    fp = Tar.entryPath e
-    base = takeBaseName fp
+--     fp = Tar.entryPath e
+--     base = takeBaseName fp
 
-    renderContent txt "markdown" = preEscapedToHtml $ commonmarkToHtml
-                                    [optSmart, optSafe]
-                                    [extTable, extAutolink]
-                                    txt
-    renderContent txt "haddock" = renderHaddock txt
-    renderContent txt _ = toHtml $ Textarea txt
+--     renderContent txt "markdown" = preEscapedToHtml $ commonmarkToHtml
+--                                     [optSmart, optSafe]
+--                                     [extTable, extAutolink]
+--                                     txt
+--     renderContent txt "haddock" = renderHaddock txt
+--     renderContent txt _ = toHtml $ Textarea txt
 
 -- addPlan
 --   :: (MonadReader env m, MonadThrow m, MonadIO m, HasLogFunc env) =>
