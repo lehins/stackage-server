@@ -12,10 +12,10 @@ $newline never
                     $forall (i, pn) <- ixInFavourOf
                       $if i /= 0
                         , #
-                      <a href="@{PackageR $ PackageName pn}">
+                      <a href="@{PackageR pn}">
                         #{pn}
             <h1>
-               #{pn}
+               #{pname}
             <p .synopsis>
                 #{synopsis}
                \ #
@@ -33,15 +33,15 @@ $newline never
                  <tr>
                    <td align="right">
                      <a href=@{SnapshotR (liSnapName li) StackageHomeR}>
-                        #{prettyName (liSnapName li)}
+                        #{snapshotPrettyNameShort (liSnapName li)}
                      :
                    <td>
                      <span .version>
-                       <a href=@{SnapshotR (liSnapName li) (StackageSdistR (PNVName pn))}>#{liVersion li}
+                       <a href=@{SnapshotR (liSnapName li) (StackageSdistR (PNVName pname))}>#{liVersion li}
               <tr>
                 <td align="right">Latest on Hackage:
                 <td>
-                  <a href="https://hackage.haskell.org/package/#{pn}-#{latestVersion}">
+                  <a href="https://hackage.haskell.org/package/#{pname}-#{latestVersion}">
                     <span .version>#{latestVersion}
 
             $if null latests
@@ -51,7 +51,7 @@ $newline never
                     . Doing so will make builds more reliable, and allow stackage.org to host generated Haddocks.
             $else
                 <p>
-                  <a href=@{PackageSnapshotsR pn}>See all snapshots <code>#{pn}</code> appears in
+                  <a href=@{PackageSnapshotsR pname}>See all snapshots <code>#{pname}</code> appears in
 
     <div .row>
         <div .span12>
@@ -105,7 +105,7 @@ $newline never
                         <p>There are no documented modules for this package.
                     $else
                         ^{hoogleForm sname}
-                        ^{renderModules sname (toPkgVer pname' version) modules}
+                        ^{renderModules sname (PackageIdentifierP pname version) modules}
 
 $if not (LT.null (LT.renderHtml (packageDescription package)))
     <div .markdown-container .readme-container>
@@ -139,7 +139,7 @@ $if not (LT.null (LT.renderHtml (packageChangelog package)))
                     $forall (i,(name, range)) <- deps
                         $if i /= 0
                             , #
-                        <a href=@{PackageR $ PackageName name} title=#{range}>
+                        <a href=@{PackageR name} title=#{range}>
                             #{name}
                     $if depsCount > maxDisplayedDeps
                       , #
@@ -152,7 +152,7 @@ $if not (LT.null (LT.renderHtml (packageChangelog package)))
                     $forall (i,(name, range)) <- revdeps
                         $if i /= 0
                             , #
-                        <a href=@{PackageR $ PackageName name} title=#{range}>
+                        <a href=@{PackageR name} title=#{range}>
                             #{name}
                     $if revdepsCount > maxDisplayedDeps
                       , #

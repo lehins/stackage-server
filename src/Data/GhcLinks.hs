@@ -1,15 +1,19 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Data.GhcLinks
   ( GhcLinks(..)
   , readGhcLinks
   ) where
 
-import ClassyPrelude.Yesod
-import Control.Monad.State.Strict (modify, execStateT)
+import           Control.Monad.State.Strict (modify, execStateT)
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Yaml as Yaml
-import System.Directory
+import           RIO
+import           RIO.FilePath
+import           RIO.Text (unpack)
+import           System.Directory
+import           Web.PathPieces
 
-import Types
+import           Types
 
 
 newtype GhcLinks = GhcLinks

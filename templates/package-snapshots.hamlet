@@ -10,9 +10,9 @@ $newline never
                         Package
                     <th>
                         Snapshot
-                $forall (snapshot, version) <- snapshots
+                $forall (sname, compiler, version, revision) <- snapshots
                     <tr>
                         <td>
                             #{version}
                         <td>
-                            <a href=@{SnapshotR (snapshotName snapshot) $ StackageSdistR $ PNVName pn}>#{snapshotTitle snapshot}
+                            <a href=@{SnapshotR sname $ StackageSdistR $ PNVName pn}>#{snapshotPrettyName sname compiler}

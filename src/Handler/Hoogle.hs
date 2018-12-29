@@ -153,7 +153,7 @@ runHoogleQuery renderUrl snapshot hoogledb HoogleQueryInput {..} =
         | x >= 20 = Nothing
         | otherwise = limitedLength (x + 1) rest
 
-    fixResult Hoogle.Target {..} = HoogleResult
+    fixResult target@(Hoogle.Target {..}) = HoogleResult
         { hrURL     = case sources of
                         [(_,[ModuleLink _ m])] -> m ++ haddockAnchorFromUrl targetURL
                         _ -> fromMaybe targetURL $ asum
@@ -167,39 +167,43 @@ runHoogleQuery renderUrl snapshot hoogledb HoogleQueryInput {..} =
         , hrBody    = targetDocs
         }
       where sources = toList $ do
-              (pname, _) <- targetPackage
-              (mname, _) <- targetModule
-              let p = PackageLink pname (makePackageLink pname)
-                  m = ModuleLink
-                        mname
-                        (T.unpack
-                             (renderUrl
-                                  (haddockUrl
-                                       snapshot
-                                       (T.pack pname)
-                                       (T.pack mname))))
-              Just (p, [m])
+              (packageLink', mname, mkModuleLink) <- targetLinks renderUrl snapshot target
+              Just (packageLink', [ModuleLink mname $ mkModuleLink $ T.pack mname])
 
             moduleLink = do
-              (pname, _) <- targetPackage
-              "module" <- Just targetType
+              (_packageLink, mname, mkModuleLink) <- targetLinks renderUrl snapshot target
+              guard (mname == "module")
               let doc = Text.HTML.DOM.parseLBS $ encodeUtf8 $ pack targetItem
                   cursor = fromDocument doc
                   item = T.concat $ cursor $// content
-              mname <- T.stripPrefix "module " item
-              return $ T.unpack $ renderUrl $ haddockUrl snapshot (T.pack pname) mname
+              mkModuleLink <$> T.stripPrefix "module " item
 
             packageLink = do
-              Nothing <- Just targetPackage
+              guard (isNothing targetPackage)
               "package" <- Just targetType
               let doc = Text.HTML.DOM.parseLBS $ encodeUtf8 $ pack targetItem
                   cursor = fromDocument doc
                   item = T.concat $ cursor $// content
-              pname <- T.stripPrefix "package " item
-              return $ T.unpack $ renderUrl $ SnapshotR snapshot $ StackageSdistR $ PNVName $ PackageName pname
+              pnameTxt <- T.stripPrefix "package " item
+              pname <- fromPathPiece pnameTxt
+              return $ T.unpack $ renderUrl $ SnapshotR snapshot $ StackageSdistR $ PNVName pname
 
             haddockAnchorFromUrl =
                 ('#':) . reverse . takeWhile (/='#') . reverse
+
+targetLinks ::
+       (Route App -> Text)
+    -> SnapName
+    -> Hoogle.Target
+    -> Maybe (PackageLink, String, Text -> String)
+targetLinks renderUrl sname Hoogle.Target {..} = do
+    (pname, _) <- targetPackage
+    (mname, _) <- targetModule
+    packageIdentifierP <- fromPathPiece $ T.pack pname
+    let mkMli modName = ModuleListingInfo modName packageIdentifierP
+        packageLink = PackageLink pname (makePackageLink pname)
+        mkModuleLink modName = T.unpack (renderUrl (haddockUrl sname (mkMli modName)))
+    return (packageLink, mname, mkModuleLink)
 
 makePackageLink :: String -> String
 makePackageLink pkg = "/package/" ++ pkg

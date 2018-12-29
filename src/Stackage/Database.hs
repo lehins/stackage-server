@@ -16,6 +16,8 @@ module Stackage.Database
     , snapshotBefore
     , lookupSnapshot
     , snapshotTitle
+    , snapshotPrettyName
+    , snapshotPrettyNameShort
     , PackageListingInfo (..)
     , getAllPackages
     , getPackages
@@ -36,7 +38,6 @@ module Stackage.Database
     , getDepsCount
     , Package (..)
     , getPackage
-    , prettyName
     , getSnapshotsForPackage
     , getSnapshots
     , countSnapshots
@@ -46,6 +47,7 @@ module Stackage.Database
     , snapshotsJSON
     , getPackageCount
     , getLatestLtsByGhc
+    , cloneOrUpdate
     ) where
 
 import RIO
@@ -68,6 +70,7 @@ import Database.Esqueleto.Internal.Language (From)
 import Distribution.PackageDescription (GenericPackageDescription)
 import Distribution.PackageDescription.Parsec
        (parseGenericPackageDescription, runParseResult)
+import Distribution.Types.Version (mkVersion)
 import CMarkGFM
 import Stackage.Database.Haddock
 import System.FilePath (takeBaseName, takeExtension)
@@ -87,20 +90,18 @@ import qualified Database.Esqueleto as E
 import qualified Data.Aeson as A
 import Types (SnapshotBranch(..))
 import Data.Pool (destroyAllResources)
-import Data.List as L (isPrefixOf)
 import Pantry.Types
-    ( BlobKey(..)
-    , FileSize(..)
-    , HasStorage(storageG)
+    ( HasStorage(storageG)
     , PackageNameP(..)
     , Storage(Storage)
     , VersionP(..)
+    , Revision(..)
     )
-import Pantry.SHA256 (SHA256)
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
 import Pantry.Hackage (updateHackageIndex, DidUpdateOccur(..))
 import Control.Monad.Trans.Class (lift)
+import Types
 
 currentSchema :: Int
 currentSchema = 2
@@ -126,8 +127,8 @@ Nightly
     day Day
     UniqueNightly day
 Package
-    name Text
-    latest Text
+    name PackageNameP
+    latest VersionP
     synopsis Text
     homepage Text
     author Text
@@ -140,7 +141,7 @@ SnapshotPackage
     snapshot SnapshotId
     package PackageId
     isCore Bool
-    version Text
+    version VersionP
     UniqueSnapshotPackage snapshot package
 SnapshotHackagePackage
     snapshot SnapshotId
@@ -157,7 +158,7 @@ HackageDep
     range Text
 Dep
     user PackageId
-    uses Text -- avoid circular dependency issue when loading database
+    uses PackageNameP -- avoid circular dependency issue when loading database
     range Text
     UniqueDep user uses
 Deprecated
@@ -421,14 +422,14 @@ addDeprecated (Deprecation name others) = do
     others' <- mapM getPackageId $ Set.toList others
     insert_ $ Deprecated name' others'
 
-getPackageId :: MonadIO m => Text -> ReaderT SqlBackend m (Key Package)
+getPackageId :: MonadIO m => PackageNameP -> ReaderT SqlBackend m (Key Package)
 getPackageId x = do
     keys' <- selectKeysList [PackageName ==. x] [LimitTo 1]
     case keys' of
         k:_ -> return k
         [] -> insert Package
             { packageName = x
-            , packageLatest = "unknown"
+            , packageLatest = VersionP (mkVersion [0,0,0,0])
             , packageSynopsis = "Metadata not found"
             , packageDescription = "Metadata not found"
             , packageChangelog = mempty
@@ -629,16 +630,19 @@ lookupSnapshot :: GetStackageDatabase env m => SnapName -> m (Maybe (Entity Snap
 lookupSnapshot name = run $ getBy $ UniqueSnapshot name
 
 snapshotTitle :: Snapshot -> Text
-snapshotTitle s =
-    T.concat [prettyName (snapshotName s), " (", displayCompiler (snapshotCompiler s), ")"]
+snapshotTitle s = snapshotPrettyName (snapshotName s) (snapshotCompiler s)
 
-prettyName :: SnapName -> Text
-prettyName name =
+snapshotPrettyName :: SnapName -> Compiler -> Text
+snapshotPrettyName sName sCompiler =
+    T.concat [snapshotPrettyNameShort sName, " (", displayCompiler sCompiler, ")"]
+
+snapshotPrettyNameShort :: SnapName -> Text
+snapshotPrettyNameShort name =
     case name of
         SNLts x y -> T.concat ["LTS Haskell ", T.pack (show x), ".", T.pack (show y)]
         SNNightly d -> "Stackage Nightly " <> T.pack (show d)
 
-getAllPackages :: GetStackageDatabase env m => m [(Text, Text, Text)] -- FIXME add information on whether included in LTS and Nightly
+getAllPackages :: GetStackageDatabase env m => m [(PackageNameP, VersionP, Text)] -- FIXME add information on whether included in LTS and Nightly
 getAllPackages = liftM (map toPair) $ run $ do
     E.select $ E.from $ \p -> do
         E.orderBy [E.asc $ E.lower_ $ p E.^. PackageName]
@@ -673,7 +677,7 @@ getPackages sid = liftM (map toPLI) $ run $ do
 
 getPackageVersionBySnapshot
   :: GetStackageDatabase env m
-  => SnapshotId -> Text -> m (Maybe Text)
+  => SnapshotId -> PackageNameP -> m (Maybe VersionP)
 getPackageVersionBySnapshot sid name = liftM (listToMaybe . map toPLI) $ run $ do
     E.select $ E.from $ \(p,sp) -> do
         E.where_ $
@@ -710,14 +714,14 @@ getSnapshotModules sid = liftM (map toMLI) $ run $ do
   where
     toMLI (E.Value name, E.Value pkg, E.Value version) = ModuleListingInfo
         { mliName = name
-        , mliPackageVersion = T.concat [pkg, "-", version]
+        , mliPackageIdentifier = PackageIdentifierP pkg version
         }
 
 getPackageModules
     :: GetStackageDatabase env m
     => SnapName
-    -> Text
-    -> m [Text]
+    -> PackageNameP
+    -> m [Text] -- TODO: Switch to [ModuleNameP]
 getPackageModules sname pname = run $ do
     sids <- selectKeysList [SnapshotName ==. sname] []
     pids <- selectKeysList [PackageName ==. pname] []
@@ -736,7 +740,7 @@ getPackageModules sname pname = run $ do
 lookupSnapshotPackage
     :: GetStackageDatabase env m
     => SnapshotId
-    -> Text
+    -> PackageNameP
     -> m (Maybe (Entity SnapshotPackage))
 lookupSnapshotPackage sid pname = run $ do
     mp <- getBy $ UniquePackage pname
@@ -744,7 +748,7 @@ lookupSnapshotPackage sid pname = run $ do
         Nothing -> return Nothing
         Just (Entity pid _) -> getBy $ UniqueSnapshotPackage sid pid
 
-getDeprecated :: GetStackageDatabase env m => Text -> m (Bool, [Text])
+getDeprecated :: GetStackageDatabase env m => PackageNameP -> m (Bool, [PackageNameP])
 getDeprecated name = run $ do
     pids <- selectKeysList [PackageName ==. name] []
     case pids of
@@ -763,7 +767,7 @@ getDeprecated name = run $ do
 
 
 getLatests :: GetStackageDatabase env m
-           => Text -- ^ package name
+           => PackageNameP -- ^ package name
            -> m [LatestInfo]
 getLatests pname = run $ fmap (nubOrd . concat) $ forM [True, False] $ \requireDocs -> do
     mlts <- latestHelper pname requireDocs
@@ -779,7 +783,7 @@ getLatests pname = run $ fmap (nubOrd . concat) $ forM [True, False] $ \requireD
 
 latestHelper
     :: (From E.SqlQuery E.SqlExpr SqlBackend t, MonadIO m)
-    => Text -- ^ package name
+    => PackageNameP -- ^ package name
     -> Bool -- ^ require docs?
     -> (E.SqlExpr (Entity Snapshot) -> t -> E.SqlExpr (E.Value Bool))
     -> (E.SqlExpr (Entity Snapshot) -> t -> [E.SqlExpr E.OrderBy])
@@ -813,7 +817,7 @@ latestHelper pname requireDocs clause order = do
         , liVersion = version
         }
 
-getDeps :: GetStackageDatabase env m => Text -> Maybe Int -> m [(Text, Text)]
+getDeps :: GetStackageDatabase env m => PackageNameP -> Maybe Int -> m [(PackageNameP, Text)]
 getDeps pname mcount = run $ do
     mp <- getBy $ UniquePackage pname
     case mp of
@@ -827,7 +831,7 @@ getDeps pname mcount = run $ do
   where
     toPair (E.Value x, E.Value y) = (x, y)
 
-getRevDeps :: GetStackageDatabase env m => Text -> Maybe Int -> m [(Text, Text)]
+getRevDeps :: GetStackageDatabase env m => PackageNameP -> Maybe Int -> m [(PackageNameP, Text)]
 getRevDeps pname mcount = run $ do
     fmap (map toPair) $ E.select $ E.from $ \(d,p) -> do
         E.where_ $
@@ -839,7 +843,7 @@ getRevDeps pname mcount = run $ do
   where
     toPair (E.Value x, E.Value y) = (x, y)
 
-getDepsCount :: GetStackageDatabase env m => Text -> m (Int, Int)
+getDepsCount :: GetStackageDatabase env m => PackageNameP -> m (Int, Int)
 getDepsCount pname = run $ (,)
   <$> (do
           mp <- getBy $ UniquePackage pname
@@ -849,22 +853,25 @@ getDepsCount pname = run $ (,)
       )
   <*> count [DepUses ==. pname]
 
-getPackage :: GetStackageDatabase env m => Text -> m (Maybe (Entity Package))
+getPackage :: GetStackageDatabase env m => PackageNameP -> m (Maybe (Entity Package))
 getPackage = run . getBy . UniquePackage
 
 getSnapshotsForPackage
     :: GetStackageDatabase env m
-    => Text
-    -> m [(Snapshot, Text)] -- version
-getSnapshotsForPackage pname = run $ do
-    pid <- getPackageId pname
-    fmap (map go) $ E.select $ E.from $ \(s, sp) -> do
-      E.where_ $ s E.^. SnapshotId E.==. sp E.^. SnapshotPackageSnapshot
-          E.&&. sp E.^. SnapshotPackagePackage E.==. E.val pid
-      E.orderBy [E.desc $ s E.^. SnapshotCreated]
-      return (s, sp E.^. SnapshotPackageVersion)
-  where
-    go (Entity _ snapshot, E.Value version) = (snapshot, version)
+    => PackageNameP
+    -> m [(SnapName, Compiler, VersionP, Revision)]
+getSnapshotsForPackage pname =
+    map (\(Single sn, Single c, Single v, Single rev) -> (sn, c, v, rev)) <$>
+    run (rawSql
+             "SELECT snapshot.name, snapshot.compiler, version.version, hackage_cabal.revision \
+                 \FROM snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
+                 \WHERE snapshot_hackage_package.cabal = hackage_cabal.id \
+                 \AND snapshot_hackage_package.snapshot = snapshot.id \
+                 \AND package_name.name = ? \
+                 \AND hackage_cabal.name = package_name.id \
+                 \AND hackage_cabal.version = version.id \
+                 \ORDER BY version.version DESC, snapshot.created DESC"
+             [toPersistValue pname])
 
 -- | Count snapshots that belong to a specific SnapshotBranch
 countSnapshots :: (GetStackageDatabase env m) => Maybe SnapshotBranch -> m Int

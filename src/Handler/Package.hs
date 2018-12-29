@@ -24,16 +24,16 @@ import           Stackage.Database
 import           Yesod.GitRepo
 
 -- | Page metadata package.
-getPackageR :: PackageName -> Handler Html
+getPackageR :: PackageNameP -> Handler Html
 getPackageR = track "Handler.Package.getPackageR" . packagePage Nothing
 
-getPackageBadgeR :: PackageName -> SnapshotBranch -> Handler TypedContent
+getPackageBadgeR :: PackageNameP -> SnapshotBranch -> Handler TypedContent
 getPackageBadgeR pname branch = track "Handler.Package.getPackageBadgeR" $ do
     cacheSeconds (3 * 60 * 60)
     snapName     <- maybe notFound pure =<< newestSnapshot branch
     Entity sid _ <- maybe notFound pure =<< lookupSnapshot snapName
-    mVersion <- do mSnapPackage <- lookupSnapshotPackage sid (unPackageName pname)
-                   pure (Version . snapshotPackageVersion . entityVal <$> mSnapPackage)
+    mVersion <- do mSnapPackage <- lookupSnapshotPackage sid pname
+                   pure (snapshotPackageVersion . entityVal <$> mSnapPackage)
 
     mLabel <- lookupGetParam "label"
     mStyle <- lookupGetParam "style"
@@ -47,47 +47,46 @@ renderStackageBadge :: (Badge b, HasRightColor b)
                     => b          -- ^ Style
                     -> Maybe Text -- ^ Label
                     -> SnapName
-                    -> Maybe Version
+                    -> Maybe VersionP
                     -> LByteString
 renderStackageBadge style mLabel snapName = \case
-    Nothing          -> renderBadge (style & right .~ lightgray) badgeLabel "not available"
-    Just (Version x) -> renderBadge style badgeLabel x
+    Nothing -> renderBadge (style & right .~ lightgray) badgeLabel "not available"
+    Just v -> renderBadge style badgeLabel $ toPathPiece v
   where
     badgeLabel = fromMaybe ("stackage " <> badgeSnapName snapName) mLabel
 
     badgeSnapName (SNNightly _) = "nightly"
     badgeSnapName (SNLts x _)   = "lts-" <> tshow x
 
-checkSpam :: PackageName -> Handler Html -> Handler Html
-checkSpam name inner = do
+checkSpam :: PackageNameP -> Handler Html -> Handler Html
+checkSpam pname inner = do
     wc <- getYesod >>= liftIO . grContent . appWebsiteContent
-    if name `member` wcSpamPackages wc
+    if pname `member` wcSpamPackages wc
       then defaultLayout $ do
-        setTitle $ "Spam package detected: " <> toHtml name
+        setTitle $ "Spam package detected: " <> toHtml pname
         $(widgetFile "spam-package")
       else inner
 
-packagePage :: Maybe (SnapName, Version)
-            -> PackageName
+packagePage :: Maybe (SnapName, VersionP)
+            -> PackageNameP
             -> Handler Html
 packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pname $ do
-    let pname' = toPathPiece pname
-    (deprecated, inFavourOf) <- getDeprecated pname'
-    latests <- getLatests pname'
-    deps' <- getDeps pname' $ Just maxDisplayedDeps
-    revdeps' <- getRevDeps pname' $ Just maxDisplayedDeps
-    (depsCount, revdepsCount) <- getDepsCount pname'
-    Entity _ package <- getPackage pname' >>= maybe notFound return
+    (deprecated, inFavourOf) <- getDeprecated pname
+    latests <- getLatests pname
+    deps' <- getDeps pname $ Just maxDisplayedDeps
+    revdeps' <- getRevDeps pname $ Just maxDisplayedDeps
+    (depsCount, revdepsCount) <- getDepsCount pname
+    Entity _ package <- getPackage pname >>= maybe notFound return
 
     mdocs <-
         case mversion of
             Just (sname, version) -> do
-                ms <- getPackageModules sname pname'
-                return $ Just (sname, toPathPiece version, ms)
+                ms <- getPackageModules sname pname
+                return $ Just (sname, version, ms)
             Nothing ->
                 case latests of
                     li:_ -> do
-                        ms <- getPackageModules (liSnapName li) pname'
+                        ms <- getPackageModules (liSnapName li) pname
                         return $ Just (liSnapName li, liVersion li, ms)
                     [] -> return Nothing
 
@@ -115,16 +114,14 @@ packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pna
             [ css_font_awesome_min_css
             , css_highlight_github_css
             ])
-        let pn = pname
-            toPkgVer x y = concat [x, "-", y]
-            hoogleForm name =
+        let hoogleForm name =
               let exact = False
                   mPackageName = Just pname
                   queryText = "" :: Text
                in $(widgetFile "hoogle-form")
         $(widgetFile "package")
   where enumerate = zip [0::Int ..]
-        renderModules sname version = renderForest [] . moduleForest . map moduleName
+        renderModules sname package = renderForest [] . moduleForest . map moduleName
           where
             renderForest _ [] = mempty
             renderForest pathRev trees =
@@ -136,7 +133,7 @@ packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pna
                 renderTree (Node{..}) = [hamlet|
                   <li>
                     $if isModule
-                      <a href=@{haddockUrl sname version path'}>#{path'}
+                      <a href=@{haddockUrl sname (ModuleListingInfo path' package)}>#{path'}
                     $else
                       #{path'}
                     ^{renderForest pathRev' subModules}
@@ -246,9 +243,9 @@ parseChunk chunk =
 renderEmail :: EmailAddress -> Text
 renderEmail = T.decodeUtf8 . toByteString
 
-getPackageSnapshotsR :: PackageName -> Handler Html
+getPackageSnapshotsR :: PackageNameP -> Handler Html
 getPackageSnapshotsR pn = track "Handler.Package.getPackageSnapshotsR" $
-  do snapshots <- getSnapshotsForPackage $ toPathPiece pn
+  do snapshots <- getSnapshotsForPackage pn
      defaultLayout
        (do setTitle ("Packages for " >> toHtml pn)
            $(combineStylesheets 'StaticR

@@ -15,6 +15,7 @@ module Application
     ) where
 
 import           RIO (LogFunc, newLogFunc, withLogFunc, logOptionsHandle, LogOptions)
+import           RIO.Prelude.Simple (runSimpleApp)
 import Control.Monad.Logger                 (liftLoc)
 import Language.Haskell.TH.Syntax           (qLocation)
 import           Control.Concurrent (forkIO)
@@ -36,7 +37,7 @@ import           Yesod.Default.Config2
 import           Yesod.Default.Handlers
 import           Yesod.GitRepo
 import           System.Process (rawSystem)
-import           Stackage.Database (openStackageDatabase, PostgresConf (..))
+import           Stackage.Database (openStackageDatabase, PostgresConf (..), cloneOrUpdate)
 import           Stackage.Database.Cron (newHoogleLocker, singleRun)
 import           Control.AutoUpdate
 import           Control.Concurrent (threadDelay)
@@ -118,11 +119,8 @@ makeFoundation logFunc appSettings = do
 
     appWebsiteContent <- if appDevDownload appSettings
         then do
-            void $ rawSystem "git"
-                [ "clone"
-                , "https://github.com/fpco/stackage-content.git"
-                ]
-            gitRepoDev "stackage-content" loadWebsiteContent
+            fp <- runSimpleApp $ cloneOrUpdate "." "fpco" "stackage-content"
+            gitRepoDev fp loadWebsiteContent
         else gitRepo
             "https://github.com/fpco/stackage-content.git"
             "master"
@@ -191,7 +189,7 @@ getApplicationDev :: IO (Settings, Application)
 getApplicationDev = do
     settings <- getAppSettings
     logOpts <- getLogOpts settings
-    -- FIXME: finalizer is discarded. Could be development?
+    -- FIXME: finalizer is discarded. Could be OK development?
     (logFunc, _ :: IO ()) <- newLogFunc logOpts
     foundation <- makeFoundation logFunc settings
     wsettings <- getDevSettings $ warpSettings foundation

@@ -9,6 +9,6 @@
                 $forall (name, version, synopsis) <- packages
                     <tr>
                         <td>
-                            <a href=@{PackageR $ PackageName name}>#{name}-#{version}
+                            <a href=@{PackageR name}>#{name}-#{version}
                         <td>
                             #{strip synopsis}

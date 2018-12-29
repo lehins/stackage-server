@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Stackage.Database.Types
@@ -18,8 +19,8 @@ module Stackage.Database.Types
     , LatestInfo(..)
     ) where
 
-import           Data.Bifunctor       (bimap)
 import           Data.Aeson
+import           Data.Bifunctor       (bimap)
 import qualified Data.Text            as T
 import           Data.Text.Read       (decimal)
 import qualified Data.Text.Read       as T (decimal)
@@ -31,6 +32,7 @@ import           RIO
 import           RIO.Process          (HasProcessContext (..), ProcessContext)
 import           RIO.Time
 import           Stackage.Types       (dtDisplay)
+import           Types
 import           Web.PathPieces
 
 data SnapName = SNLts !Int !Int
@@ -107,8 +109,8 @@ instance HasStorage StackageCron where
 
 
 data PantryHackageCabal = PantryHackageCabal
-  { phcPackageName    :: !PackageName
-  , phcPackageVersion :: !Version
+  { phcPackageName    :: !PackageNameP
+  , phcPackageVersion :: !VersionP
   , phcSHA256         :: !SHA256
   , phcFileSize       :: !FileSize
   } deriving Show
@@ -124,8 +126,14 @@ data PantryPackage =
 -- | Convert a pantry representation for hackage cabal package.
 pantryHackageCabalToPackageIdentifierRevision
   :: PantryHackageCabal -> PackageIdentifierRevision
-pantryHackageCabalToPackageIdentifierRevision (PantryHackageCabal {..}) =
-    PackageIdentifierRevision phcPackageName phcPackageVersion (CFIHash phcSHA256 (Just phcFileSize))
+pantryHackageCabalToPackageIdentifierRevision phc =
+    PackageIdentifierRevision pname pversion (CFIHash phcSHA256 (Just phcFileSize))
+  where
+    PantryHackageCabal { phcPackageName = PackageNameP pname
+                       , phcPackageVersion = VersionP pversion
+                       , phcSHA256
+                       , phcFileSize
+                       } = phc
 
 newtype Compiler =
     CompilerGHC { ghcVersion :: Version }
@@ -161,8 +169,8 @@ data SnapshotFile = SnapshotFile
     { sfName     :: !SnapName
     , sfCompiler :: !Compiler
     , sfPackages :: ![PantryPackage]
-    , sfHidden   :: !(Map PackageName Bool)
-    , sfFlags    :: !(Map PackageName (Map Text Bool))
+    , sfHidden   :: !(Map PackageNameP Bool)
+    , sfFlags    :: !(Map PackageNameP (Map Text Bool))
     }
 
 -- QUESTION: Potentially switch to `parsePackageIdentifierRevision`:
@@ -224,8 +232,8 @@ instance FromJSON SnapshotFile where
 
 
 data PackageListingInfo = PackageListingInfo
-    { pliName     :: !Text
-    , pliVersion  :: !Text
+    { pliName     :: !PackageNameP
+    , pliVersion  :: !VersionP
     , pliSynopsis :: !Text
     , pliIsCore   :: !Bool
     } deriving Show
@@ -242,12 +250,12 @@ instance ToJSON PackageListingInfo where
 
 
 data ModuleListingInfo = ModuleListingInfo
-    { mliName           :: !Text
-    , mliPackageVersion :: !Text
+    { mliName              :: !Text  -- TODO: Change to ModuleName
+    , mliPackageIdentifier :: !PackageIdentifierP
     } deriving Show
 
 
 data LatestInfo = LatestInfo
     { liSnapName :: !SnapName
-    , liVersion  :: !Text
+    , liVersion  :: !VersionP
     } deriving (Show, Eq, Ord)

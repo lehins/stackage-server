@@ -19,18 +19,19 @@ import           Distribution.Package          (PackageName)
 import           Distribution.Version          (VersionRange)
 import           Prelude                       hiding (pi)
 import           Stackage.PackageIndex.Conduit (parseDistText, renderDistText)
+import           Pantry.Types (PackageNameP(..), VersionP(..))
 
 data PackageInfo = PackageInfo
     { piLatest          :: !Version
     , piHash            :: !Text
-    , piAllVersions     :: !(Set Version)
+    , piAllVersions     :: !(Set VersionP)
     , piSynopsis        :: !Text
     , piDescription     :: !Text
     , piDescriptionType :: !Text
     , piChangeLog       :: !Text
     , piChangeLogType   :: !Text
-    , piBasicDeps       :: !(Map PackageName VersionRange)
-    , piTestBenchDeps   :: !(Map PackageName VersionRange)
+    , piBasicDeps       :: !(Map PackageNameP VersionRange)
+    , piTestBenchDeps   :: !(Map PackageNameP VersionRange)
     , piAuthor          :: !Text
     , piMaintainer      :: !Text
     , piHomepage        :: !Text
@@ -41,7 +42,7 @@ instance ToJSON PackageInfo where
     toJSON pi = object
         [ "latest" .= renderDistText (piLatest pi)
         , "hash" .= piHash pi
-        , "all-versions" .= map renderDistText (Set.toList $ piAllVersions pi)
+        , "all-versions" .= map (renderDistText . unVersionP) (Set.toList $ piAllVersions pi)
         , "synopsis" .= piSynopsis pi
         , "description" .= piDescription pi
         , "description-type" .= piDescriptionType pi
@@ -55,12 +56,12 @@ instance ToJSON PackageInfo where
         , "license-name" .= piLicenseName pi
         ]
       where
-        showM = Map.mapKeysWith const renderDistText . Map.map renderDistText
+        showM = Map.mapKeys (renderDistText . unPackageNameP) . Map.map renderDistText
 instance FromJSON PackageInfo where
     parseJSON = withObject "PackageInfo" $ \o -> PackageInfo
         <$> (o .: "latest" >>= parseDistText)
         <*> o .: "hash"
-        <*> (o .: "all-versions" >>= fmap Set.fromList . mapM parseDistText)
+        <*> (o .: "all-versions" >>= fmap (Set.map VersionP . Set.fromList) . mapM parseDistText)
         <*> o .: "synopsis"
         <*> o .: "description"
         <*> o .: "description-type"
@@ -77,11 +78,11 @@ instance FromJSON PackageInfo where
         go (name, range) = do
             name' <- parseDistText name
             range' <- parseDistText range
-            return (name', range')
+            return (PackageNameP name', range')
 
 data Deprecation = Deprecation
-    { depPackage    :: !Text
-    , depInFavourOf :: !(Set Text)
+    { depPackage    :: !PackageNameP
+    , depInFavourOf :: !(Set PackageNameP)
     }
 instance ToJSON Deprecation where
     toJSON d = object

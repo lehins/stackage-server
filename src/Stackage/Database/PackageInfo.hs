@@ -25,15 +25,15 @@ import           Distribution.Types.Library (exposedModules)
 import           Distribution.Types.VersionRange
                          (VersionRange, intersectVersionRanges, normaliseVersionRange, withinRange)
 import           Distribution.Version (mkVersion, simplifyVersionRange)
-import           Pantry.Types (PackageNameP(..))
+import           Pantry.Types (PackageNameP(..), VersionP(..))
 import           RIO
 import qualified RIO.Map as Map
 import           Stackage.Database.Haddock (renderHaddock)
-import           Stackage.Types (dtDisplay)
 import           Text.Blaze.Html (Html)
 
 data PackageInfo = PackageInfo
-    { piName         :: Text
+    { piName         :: PackageNameP
+    , piVersion      :: VersionP
     , piSynopsis     :: Text
     , piDescription  :: Html
     , piChangelog    :: Html
@@ -48,7 +48,8 @@ data PackageInfo = PackageInfo
 formatPackageInfo :: GenericPackageDescription -> PackageInfo
 formatPackageInfo gpd =
     PackageInfo
-        { piName = dtDisplay $ pkgName $ package pd
+        { piName = PackageNameP $ pkgName $ package pd
+        , piVersion = VersionP $ pkgVersion $ package pd
         , piSynopsis = T.pack $ synopsis pd
         , piDescription = renderHaddock (description pd) -- FIXME: use README.md if available
         , piChangelog = mempty -- FIXME: get changelog
@@ -57,16 +58,17 @@ formatPackageInfo gpd =
         , piHomepage = T.pack $ homepage pd
         , piLicenseName = T.pack $ prettyShow $ license pd
         , piModuleForest = moduleForest $ maybe [] toForest $ condLibrary gpd
+        -- TODO: add reexported modules feature
         }
   where pd = packageDescription gpd
         toForest = exposedModules . condTreeData
 
-extractDependencies :: GenericPackageDescription -> Map PackageName VersionRange
+extractDependencies :: GenericPackageDescription -> Map PackageNameP VersionRange
 extractDependencies gpd =
     combineDeps $
     maybeToList (getDeps' <$> condLibrary gpd) ++ map (getDeps' . snd) (condExecutables gpd)
   where
-    getDeps' :: CondTree ConfVar [Dependency] a -> Map PackageName VersionRange
+    getDeps' :: CondTree ConfVar [Dependency] a -> Map PackageNameP VersionRange
     getDeps' = getDeps (getCheckCond gpd)
 
 
@@ -104,18 +106,19 @@ getCheckCond gpd = go
 getDeps ::
        (Condition ConfVar -> Bool)
     -> CondTree ConfVar [Dependency] a
-    -> Map PackageName VersionRange
+    -> Map PackageNameP VersionRange
 getDeps checkCond = goTree
   where
     goTree (CondNode _data deps comps) =
         combineDeps $
-        map (\(Dependency name range) -> Map.singleton name range) deps ++ map goComp comps
+        map (\(Dependency name range) -> Map.singleton (PackageNameP name) range) deps ++
+        map goComp comps
     goComp (CondBranch cond yes no)
         | checkCond cond = goTree yes
         | otherwise = maybe Map.empty goTree no
 
 
-combineDeps :: [Map PackageName VersionRange] -> Map PackageName VersionRange
+combineDeps :: [Map PackageNameP VersionRange] -> Map PackageNameP VersionRange
 combineDeps =
     Map.unionsWith
         (\x -> normaliseVersionRange . simplifyVersionRange . intersectVersionRanges x)

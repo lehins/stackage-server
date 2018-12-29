@@ -22,7 +22,7 @@ data WebsiteContent = WebsiteContent
     , wcGhcLinks :: !GhcLinks
     , wcStackReleases :: ![StackRelease]
     , wcPosts :: !(Vector Post)
-    , wcSpamPackages :: !(Set PackageName)
+    , wcSpamPackages :: !(Set PackageNameP)
     -- ^ Packages considered spam which should not be displayed.
     }
 
@@ -48,7 +48,7 @@ loadWebsiteContent dir = do
       putStrLn $ "Error loading posts: " ++ tshow e
       return mempty
     wcSpamPackages <- decodeFileEither (dir </> "spam-packages.yaml")
-                  >>= either throwIO (return . setFromList . map PackageName)
+                  >>= either throwIO (return . setFromList)
     return WebsiteContent {..}
   where
     readHtml fp = fmap preEscapedToMarkup $ readFileUtf8 $ dir </> fp

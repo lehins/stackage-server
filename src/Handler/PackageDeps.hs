@@ -9,7 +9,7 @@ module Handler.PackageDeps
 import Import
 import Stackage.Database
 
-getPackageDepsR :: PackageName -> Handler Html
+getPackageDepsR :: PackageNameP -> Handler Html
 getPackageDepsR = packageDeps Nothing
 
 getSnapshotPackageDepsR :: SnapName -> PackageNameVersion -> Handler Html
@@ -17,10 +17,10 @@ getSnapshotPackageDepsR snap (PNVNameVersion pname version) =
   packageDeps (Just (snap, version)) pname
 getSnapshotPackageDepsR _ _ = notFound
 
-packageDeps :: Maybe (SnapName, Version) -> PackageName -> Handler Html
+packageDeps :: Maybe (SnapName, VersionP) -> PackageNameP -> Handler Html
 packageDeps = helper Deps
 
-getPackageRevDepsR :: PackageName -> Handler Html
+getPackageRevDepsR :: PackageNameP -> Handler Html
 getPackageRevDepsR = packageRevDeps Nothing
 
 getSnapshotPackageRevDepsR :: SnapName -> PackageNameVersion -> Handler Html
@@ -28,17 +28,17 @@ getSnapshotPackageRevDepsR snap (PNVNameVersion pname version) =
   packageRevDeps (Just (snap, version)) pname
 getSnapshotPackageRevDepsR _ _ = notFound
 
-packageRevDeps :: Maybe (SnapName, Version) -> PackageName -> Handler Html
+packageRevDeps :: Maybe (SnapName, VersionP) -> PackageNameP -> Handler Html
 packageRevDeps = helper Revdeps
 
 data DepType = Deps | Revdeps
 
-helper :: DepType -> Maybe (SnapName, Version) -> PackageName -> Handler Html
+helper :: DepType -> Maybe (SnapName, VersionP) -> PackageNameP -> Handler Html
 helper depType mversion pname = track "Handler.PackageDeps.helper" $ do
   deps <-
     (case depType of
        Deps -> getDeps
-       Revdeps -> getRevDeps) (toPathPiece pname) Nothing
+       Revdeps -> getRevDeps) pname Nothing
   let packagePage =
         case mversion of
           Nothing -> PackageR pname
@@ -56,5 +56,5 @@ helper depType mversion pname = track "Handler.PackageDeps.helper" $ do
       <ul>
         $forall (name, range) <- deps
           <li>
-            <a href=@{PackageR $ PackageName name} title=#{range}>#{name}
+            <a href=@{PackageR name} title=#{range}>#{name}
     |]

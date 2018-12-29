@@ -26,8 +26,8 @@ getStackageSdistR sname (PNVNameVersion pname version) = track "Handler.Stackage
         then packagePage (Just (sname, version)) pname >>= sendResponse
         else redirect $ SnapshotR sname $ StackageSdistR $ PNVNameVersion pname version'
 
-versionHelper :: SnapName -> PackageName -> Handler Version
+versionHelper :: SnapName -> PackageNameP -> Handler VersionP
 versionHelper sname pname = do
     Entity sid _ <- lookupSnapshot sname >>= maybe notFound return
-    Entity _ sp <- lookupSnapshotPackage sid (toPathPiece pname) >>= maybe notFound return
-    maybe notFound return $ fromPathPiece $ snapshotPackageVersion sp
+    Entity _ sp <- lookupSnapshotPackage sid pname >>= maybe notFound return
+    return $ snapshotPackageVersion sp

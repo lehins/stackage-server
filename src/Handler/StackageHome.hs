@@ -154,7 +154,7 @@ getDocsR name = track "Handler.StackageHome.getDocsR" $ do
     Entity sid _ <- lookupSnapshot name >>= maybe notFound return
     mlis <- getSnapshotModules sid
     render <- getUrlRender
-    let mliUrl mli = render $ haddockUrl name (mliPackageVersion mli) (mliName mli)
+    let mliUrl mli = render $ haddockUrl name mli
     defaultLayout $ do
         setTitle $ toHtml $ "Module list for " ++ toPathPiece name
         $(widgetFile "doc-list")

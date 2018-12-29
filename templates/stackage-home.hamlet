@@ -39,7 +39,7 @@ $newline never
                 $forall pli <- packages
                     <tr>
                         <td>
-                            <a href=@{packageUrl name (PackageName $ pliName pli) (Version $ pliVersion pli)}>
+                            <a href=@{packageUrl name (pliName pli) (pliVersion pli)}>
                                 #{pliName pli}-#{pliVersion pli}
                         <td>
                             #{strip $ pliSynopsis pli}

@@ -1,12 +1,33 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-module Types where
+module Types
+    ( SnapshotBranch(..)
+    , PackageNameP(..)
+    , unPackageName -- TODO: rename to packageNameText
+    , VersionP(..)
+    , PackageIdentifierP(..)
+    , PackageNameVersion(..)
+    , HoogleVersion(..)
+    , currentHoogleVersion
+    , UnpackStatus(..)
+    , StackageExecutable(..)
+    , GhcMajorVersion(..)
+    , GhcMajorVersionFailedParse(..)
+    , ghcMajorVersionToText
+    , ghcMajorVersionFromText
+    , SupportedArch(..)
+    , Year
+    , Month(Month)
+    ) where
 
-import ClassyPrelude.Yesod
+import RIO
 import Data.Aeson
 import Data.Hashable (hashUsing)
-import Text.Blaze (ToMarkup)
+--import Data.Builder (ToBuilder(..))
+import Text.Blaze (ToMarkup(..))
 import Database.Persist.Sql (PersistFieldSql (sqlType))
+import Database.Persist
 import qualified Data.Text as T
 import qualified Data.Text.Lazy.Builder.Int as Builder
 import qualified Data.Text.Lazy.Builder as Builder
@@ -14,6 +35,11 @@ import qualified Data.Text.Lazy as LText
 import qualified Data.Text.Read as Reader
 import Data.Char (ord)
 import Control.Monad.Catch (MonadThrow, throwM)
+import Pantry.Types
+import Web.PathPieces
+import Data.Hashable
+import Database.Esqueleto.Internal.Language
+import ClassyPrelude.Yesod (ToBuilder(..))
 
 data SnapshotBranch = LtsMajorBranch Int
                     | LtsBranch
@@ -22,58 +48,75 @@ data SnapshotBranch = LtsMajorBranch Int
 instance PathPiece SnapshotBranch where
     toPathPiece NightlyBranch = "nightly"
     toPathPiece LtsBranch     = "lts"
-    toPathPiece (LtsMajorBranch x) = "lts-" ++ tshow x
+    toPathPiece (LtsMajorBranch x) = "lts-" <> T.pack (show x)
 
     fromPathPiece "nightly" = Just NightlyBranch
     fromPathPiece "lts" = Just LtsBranch
     fromPathPiece t0 = do
-        t1 <- stripPrefix "lts-" t0
+        t1 <- T.stripPrefix "lts-" t0
         Right (x, "") <- Just $ Reader.decimal t1
         Just $ LtsMajorBranch x
 
-newtype PackageName = PackageName { unPackageName :: Text }
-    deriving (Show, Read, Typeable, Eq, Ord, Hashable, PathPiece, ToMarkup, PersistField, IsString)
-instance ToJSON PackageName where
-    toJSON = toJSON . unPackageName
-instance ToJSONKey PackageName
-instance PersistFieldSql PackageName where
-    sqlType = sqlType . liftM unPackageName
-newtype Version = Version { unVersion :: Text }
-    deriving (Show, Read, Typeable, Eq, Ord, Hashable, PathPiece, ToMarkup, PersistField)
-instance ToJSON Version where
-    toJSON = toJSON . unVersion
-instance PersistFieldSql Version where
-    sqlType = sqlType . liftM unVersion
+unPackageName :: PackageNameP -> Text
+unPackageName = utf8BuilderToText . display
+
 newtype PackageSetIdent = PackageSetIdent { unPackageSetIdent :: Text }
     deriving (Show, Read, Typeable, Eq, Ord, Hashable, PathPiece, ToMarkup, PersistField)
 instance PersistFieldSql PackageSetIdent where
     sqlType = sqlType . liftM unPackageSetIdent
 
-data PackageNameVersion = PNVTarball !PackageName !Version
-                        | PNVNameVersion !PackageName !Version
-                        | PNVName !PackageName
-    deriving (Show, Read, Typeable, Eq, Ord)
+data PackageNameVersion = PNVTarball !PackageNameP !VersionP
+                        | PNVNameVersion !PackageNameP !VersionP
+                        | PNVName !PackageNameP
+    deriving (Read, Show, Eq, Ord)
+
+data PackageIdentifierP =
+    PackageIdentifierP !PackageNameP
+                       !VersionP
+    deriving (Eq, Ord, Show)
+instance PathPiece PackageIdentifierP where
+    toPathPiece (PackageIdentifierP x y) = T.concat [toPathPiece x, "-", toPathPiece y]
+    fromPathPiece t = do
+        let (tName', tVer) = T.breakOnEnd "-" t
+        (tName, '-') <- T.unsnoc tName'
+        guard $ not (T.null tName || T.null tVer)
+        PackageIdentifierP <$> fromPathPiece tName <*> fromPathPiece tVer
+instance Hashable PackageNameP where
+  hashWithSalt = hashUsing unPackageName
+instance ToBuilder PackageNameP Builder where
+    toBuilder = getUtf8Builder . display
+
+instance PathPiece PackageNameP where
+    fromPathPiece = fmap PackageNameP . parsePackageName . T.unpack
+    toPathPiece (PackageNameP pn) = T.pack $ packageNameString pn
+instance ToMarkup PackageNameP where
+    toMarkup (PackageNameP pn) = toMarkup $ packageNameString pn
+instance SqlString PackageNameP
+
+instance PathPiece VersionP where
+    fromPathPiece = fmap VersionP . parseVersion . T.unpack
+    toPathPiece (VersionP v) = T.pack $ versionString v
+instance ToMarkup VersionP where
+    toMarkup (VersionP v) = toMarkup $ versionString v
+instance ToBuilder VersionP Builder where
+    toBuilder = getUtf8Builder . display
+
 
 instance PathPiece PackageNameVersion where
-    toPathPiece (PNVTarball x y) = concat [toPathPiece x, "-", toPathPiece y, ".tar.gz"]
-    toPathPiece (PNVNameVersion x y) = concat [toPathPiece x, "-", toPathPiece y]
+    toPathPiece (PNVTarball x y) = T.concat [toPathPiece x, "-", toPathPiece y, ".tar.gz"]
+    toPathPiece (PNVNameVersion x y) = T.concat [toPathPiece x, "-", toPathPiece y]
     toPathPiece (PNVName x) = toPathPiece x
-    fromPathPiece t' | Just t <- stripSuffix ".tar.gz" t' =
+    fromPathPiece t'
+        | Just t <- T.stripSuffix ".tar.gz" t' = do
+            PackageIdentifierP name version <- fromPathPiece t
+            return $ PNVTarball name version
+    fromPathPiece t =
         case T.breakOnEnd "-" t of
-            ("", _) -> Nothing
-            (_, "") -> Nothing
-            (T.init -> name, version) -> Just $ PNVTarball (PackageName name) (Version version)
-    fromPathPiece t = Just $
-        case T.breakOnEnd "-" t of
-            ("", _) -> PNVName (PackageName t)
-            (T.init -> name, version) | validVersion version ->
-                PNVNameVersion (PackageName name) (Version version)
-            _ -> PNVName (PackageName t)
-      where
-        validVersion =
-            all f
-          where
-            f c = (c == '.') || ('0' <= c && c <= '9')
+            ("", _) -> PNVName <$> fromPathPiece t
+            (fromPathPiece . T.init -> Just name, fromPathPiece -> Just version) ->
+                Just $ PNVNameVersion name version
+            _ -> PNVName <$> fromPathPiece t
+
 
 newtype HoogleVersion = HoogleVersion Text
     deriving (Show, Eq, Ord, Typeable, PathPiece)
@@ -175,11 +218,11 @@ newtype Month = Month Int
   deriving (Eq, Read, Show, Ord)
 instance PathPiece Month where
   toPathPiece (Month i)
-    | i < 10 = pack $ '0' : show i
+    | i < 10 = T.pack $ '0' : show i
     | otherwise = tshow i
   fromPathPiece "10" = Just $ Month 10
   fromPathPiece "11" = Just $ Month 11
   fromPathPiece "12" = Just $ Month 12
-  fromPathPiece (unpack -> ['0', c])
+  fromPathPiece (T.unpack -> ['0', c])
     | '1' <= c && c <= '9' = Just $ Month $ ord c - ord '0'
   fromPathPiece _ = Nothing

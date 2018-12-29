@@ -93,13 +93,16 @@ redirectWithVersion ::
        (GetStackageDatabase env m, MonadHandler m) => SnapName -> [Text] -> m (Maybe (Route App))
 redirectWithVersion slug rest =
     case rest of
-        [pkg,file] -> do
+        [pkg, file] -> do
             Entity sid _ <- lookupSnapshot slug >>= maybe notFound return
-            mversion <- getPackageVersionBySnapshot sid pkg
+            pname <- maybe notFound return $ fromPathPiece pkg
+            mversion <- getPackageVersionBySnapshot sid pname
             case mversion of
                 Nothing -> return Nothing -- error "That package is not part of this snapshot."
                 Just version -> do
-                    return (Just (HaddockR slug [pkg <> "-" <> version, file]))
+                    return
+                        (Just
+                             (HaddockR slug [toPathPiece $ PackageIdentifierP pname version, file]))
         _ -> return Nothing
 
 getHaddockBackupR :: [Text] -> Handler ()

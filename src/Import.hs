@@ -17,6 +17,7 @@ import Data.Text.Read (decimal)
 import Data.Time.Clock (diffUTCTime)
 --import qualified Prometheus as P
 import Stackage.Database (SnapName)
+import Stackage.Database.Types (ModuleListingInfo(..))
 import Formatting (format)
 import Formatting.Time (diff)
 
@@ -32,18 +33,17 @@ parseLtsPair t1 = do
     (y, "") <- either (const Nothing) Just $ decimal t3
     Just (x, y)
 
-packageUrl :: SnapName -> PackageName -> Version -> Route App
+packageUrl :: SnapName -> PackageNameP -> VersionP -> Route App
 packageUrl sname pkgname pkgver = SnapshotR sname sdistR
   where
     sdistR = StackageSdistR (PNVNameVersion pkgname pkgver)
 
 haddockUrl :: SnapName
-           -> Text -- ^ package-version
-           -> Text -- ^ module name
+           -> ModuleListingInfo
            -> Route App
-haddockUrl sname pkgver name = HaddockR sname
-    [ pkgver
-    , omap toDash name ++ ".html"
+haddockUrl sname mli = HaddockR sname
+    [ toPathPiece $ mliPackageIdentifier mli
+    , omap toDash (mliName mli) ++ ".html"
     ]
   where
     toDash '.' = '-'

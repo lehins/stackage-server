@@ -1,7 +1,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 module Handler.BuildPlan where
 
-import Import hiding (get, PackageName (..), Version (..), DList)
+import Import hiding (get, DList)
 --import Stackage.Types
 import Stackage.Database
 

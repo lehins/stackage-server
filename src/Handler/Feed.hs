@@ -62,7 +62,7 @@ getContent sid2 snap = do
             let name2 = snapshotName snap
             withUrlRenderer
                 [hamlet|
-                  <p>Difference between #{prettyName name1} and #{prettyName $ snapshotName snap}
+                  <p>Difference between #{snapshotPrettyNameShort name1} and #{snapshotPrettyNameShort $ snapshotName snap}
                   <table border=1 cellpadding=5>
                     <thead>
                       <tr>
@@ -70,9 +70,9 @@ getContent sid2 snap = do
                         <th align=right>Old
                         <th align=left>New
                     <tbody>
-                      $forall (pkgname@(PackageName name), VersionChange change, versionDiff) <- toVersionedDiffList snapDiff
+                      $forall (pkgname, VersionChange change, versionDiff) <- toVersionedDiffList snapDiff
                         <tr>
-                          <th align=right>#{name}
+                          <th align=right>#{pkgname}
                           $case change
                             $of This old
                               <td align=right>

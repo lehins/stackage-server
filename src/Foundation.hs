@@ -12,7 +12,7 @@ import           Types
 import           Yesod.Core.Types (Logger)
 import           Yesod.AtomFeed
 import           Yesod.GitRepo
-import Stackage.Database
+import           Stackage.Database
 import qualified Yesod.Core.Unsafe as Unsafe
 import           Yesod.GitRev (GitRev)
 

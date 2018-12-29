@@ -1,4 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Types
   ( BuildPlan (..)
@@ -6,8 +5,6 @@ module Stackage.Types
   , PackagePlan (..)
   , DocMap
   , PackageDocs (..)
-  , PackageName
-  , Version
   , dtDisplay
   , simpleParse
   ) where
@@ -15,14 +12,13 @@ module Stackage.Types
 import qualified Distribution.Text               as DT
 import ClassyPrelude.Conduit
 import Data.Aeson
-import Distribution.Types.PackageName (PackageName, mkPackageName)
-import Distribution.Version (Version)
 import Control.Monad.Catch (MonadThrow, throwM)
 import Data.Typeable (TypeRep, Typeable, typeOf)
+import Pantry.Types (PackageNameP(..), VersionP(..))
 
 data BuildPlan = BuildPlan
   { bpSystemInfo :: !SystemInfo
-  , bpPackages :: !(Map PackageName PackagePlan)
+  , bpPackages :: !(Map PackageNameP PackagePlan)
   }
 instance FromJSON BuildPlan where
   parseJSON = withObject "BuildPlan" $ \o -> BuildPlan
@@ -30,8 +26,8 @@ instance FromJSON BuildPlan where
     <*> o .: "packages"
 
 data SystemInfo = SystemInfo
-  { siGhcVersion :: !Version
-  , siCorePackages :: !(Map PackageName Version)
+  { siGhcVersion :: !VersionP
+  , siCorePackages :: !(Map PackageNameP VersionP)
   }
 instance FromJSON SystemInfo where
   parseJSON = withObject "SystemInfo" $ \o -> SystemInfo
@@ -39,7 +35,7 @@ instance FromJSON SystemInfo where
     <*> o .: "core-packages"
 
 data PackagePlan = PackagePlan
-  { ppVersion :: Version
+  { ppVersion :: VersionP
   }
 instance FromJSON PackagePlan where
   parseJSON = withObject "PackagePlan" $ \o -> PackagePlan
@@ -79,21 +75,3 @@ simpleParse orig = withTypeRep $ \rep ->
 
         unwrap :: m a -> a
         unwrap _ = error "unwrap"
-
--- orphans
-
-instance FromJSON Version where
-  parseJSON = withText "Version" $ either (fail . show) pure . simpleParse
-instance FromJSON PackageName where
-  parseJSON = withText "PackageName" $ pure . mkPackageName . unpack
-instance FromJSONKey PackageName where
-  fromJSONKey = FromJSONKeyText $ mkPackageName . unpack
-
-
-
--- data PackageOrigin
---   = OriginCore
---   | OriginHackage
---   | OriginArchive
---   | OriginGit
---   | OriginMercurial
