@@ -1,4 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE TupleSections     #-}
 
 -- | Lists the package page similar to Hackage.
 
@@ -18,9 +19,11 @@ import           Distribution.Package.ModuleForest
 import           Graphics.Badge.Barrier
 import           Control.Lens
 import           Import
+import           Text.Blaze (toMarkup)
 import qualified Text.Blaze.Html.Renderer.Text as LT
 import           Text.Email.Validate
 import           Stackage.Database
+import           Stackage.Database.PackageInfo (PackageInfo(..))
 import           Yesod.GitRepo
 
 -- | Page metadata package.
@@ -67,46 +70,51 @@ checkSpam pname inner = do
         $(widgetFile "spam-package")
       else inner
 
-packagePage :: Maybe (SnapName, VersionP)
+packagePage :: Maybe SnapName
             -> PackageNameP
             -> Handler Html
-packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pname $ do
+packagePage msname pname = track "Handler.Package.packagePage" $ checkSpam pname $ do
     (deprecated, inFavourOf) <- getDeprecated pname
+
+    -- FIXME: handle dependencies
+    let deps' = [] :: [(PackageNameP, Text)]
+        revdeps' = [] :: [(PackageNameP, Text)]
+        (depsCount, revdepsCount) = (0,0)
+        consTuple x0 (x1, x2, x3) = (x0, x1, x2, x3)
     latests <- getLatests pname
-    deps' <- getDeps pname $ Just maxDisplayedDeps
-    revdeps' <- getRevDeps pname $ Just maxDisplayedDeps
-    (depsCount, revdepsCount) <- getDepsCount pname
-    Entity _ package <- getPackage pname >>= maybe notFound return
+    --let latests = []
+    -- short circuit, if we don't know about a package with such name
+    hackage@(hackageBlobId, hackageVersion, hackageRevision) <-
+      getHackageLatestVersion pname >>= maybe notFound return
+    (mSnapName, cabalBlobId, curVer, curRev) <- case msname of
+      Just sname -> getVersionForSnapshot sname pname >>= maybe notFound (return . consTuple msname)
+      Nothing ->
+        maybe (consTuple Nothing hackage) (\ (s, bid, ver, rev) -> (Just s, bid, ver, rev))
+        <$> getSnapshotLatestVersion pname
+    -- May fail on cabal file parsing:
+    PackageInfo{..} <- getPackageInfo cabalBlobId
+    let mdocs = (, piVersion, piModuleForest) <$> mSnapName
+        -- Only show current version ("Version on this page") if it doesn't match latest known:
+        mdisplayedVersion = guard (cabalBlobId /= hackageBlobId) >> Just curVer
+        (packageDepsLink, packageRevDepsLink) =
+               case mSnapName of
+                 Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
+                 Just snap ->
+                   let wrap f = SnapshotR snap $ f $ PNVNameVersion pname curVer
+                    in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
 
-    mdocs <-
-        case mversion of
-            Just (sname, version) -> do
-                ms <- getPackageModules sname pname
-                return $ Just (sname, version, ms)
-            Nothing ->
-                case latests of
-                    li:_ -> do
-                        ms <- getPackageModules (liSnapName li) pname
-                        return $ Just (liSnapName li, liVersion li, ms)
-                    [] -> return Nothing
-
-    let ixInFavourOf = zip [0::Int ..] inFavourOf
-        mdisplayedVersion = toPathPiece . snd <$> mversion
-        latestVersion = packageLatest package
-
-    let homepage = case T.strip (packageHomepage package) of
+    let mhomepage = case T.strip (piHomepage) of
                      x | null x -> Nothing
                        | otherwise -> Just x
-        synopsis = packageSynopsis package
         deps = enumerate deps'
         revdeps = enumerate revdeps'
-        authors = enumerate (parseIdentitiesLiberally (packageAuthor package))
-        maintainers = let ms = enumerate (parseIdentitiesLiberally (packageMaintainer package))
+        authors = enumerate (parseIdentitiesLiberally piAuthor)
+        maintainers = let ms = enumerate (parseIdentitiesLiberally piMaintainer)
                       in if ms == authors
                             then []
                             else ms
     defaultLayout $ do
-        setTitle $ toHtml pname
+        setTitle $ toHtml piName
         $(combineScripts 'StaticR
                           [ js_highlight_js
                           ])
@@ -121,7 +129,7 @@ packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pna
                in $(widgetFile "hoogle-form")
         $(widgetFile "package")
   where enumerate = zip [0::Int ..]
-        renderModules sname package = renderForest [] . moduleForest . map moduleName
+        renderModules sname package = renderForest []
           where
             renderForest _ [] = mempty
             renderForest pathRev trees =
@@ -145,12 +153,91 @@ packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pna
         maxDisplayedDeps :: Int
         maxDisplayedDeps = 40
 
-        (packageDepsLink, packageRevDepsLink) =
-          case mversion of
-            Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
-            Just (snap, version) ->
-              let wrap f = SnapshotR snap $ f $ PNVNameVersion pname version
-               in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
+
+-- packagePage :: Maybe (SnapName, VersionP)
+--             -> PackageNameP
+--             -> Handler Html
+-- packagePage mversion pname = track "Handler.Package.packagePage" $ checkSpam pname $ do
+--     (deprecated, inFavourOf) <- getDeprecated pname
+--     latests <- getLatests pname
+--     deps' <- getDeps pname $ Just maxDisplayedDeps
+--     revdeps' <- getRevDeps pname $ Just maxDisplayedDeps
+--     (depsCount, revdepsCount) <- getDepsCount pname
+--     Entity _ package <- getPackage pname >>= maybe notFound return
+
+--     mdocs <-
+--         case mversion of
+--             Just (sname, version) -> do
+--                 ms <- getPackageModules sname pname
+--                 return $ Just (sname, version, ms)
+--             Nothing ->
+--                 case latests of
+--                     li:_ -> do
+--                         ms <- getPackageModules (liSnapName li) pname
+--                         return $ Just (liSnapName li, liVersion li, ms)
+--                     [] -> return Nothing
+
+--     let ixInFavourOf = zip [0::Int ..] inFavourOf
+--         mdisplayedVersion = toPathPiece . snd <$> mversion
+--         latestVersion = packageLatest package
+
+--     let homepage = case T.strip (packageHomepage package) of
+--                      x | null x -> Nothing
+--                        | otherwise -> Just x
+--         synopsis = packageSynopsis package
+--         deps = enumerate deps'
+--         revdeps = enumerate revdeps'
+--         authors = enumerate (parseIdentitiesLiberally (packageAuthor package))
+--         maintainers = let ms = enumerate (parseIdentitiesLiberally (packageMaintainer package))
+--                       in if ms == authors
+--                             then []
+--                             else ms
+--     defaultLayout $ do
+--         setTitle $ toHtml pname
+--         $(combineScripts 'StaticR
+--                           [ js_highlight_js
+--                           ])
+--         $(combineStylesheets 'StaticR
+--             [ css_font_awesome_min_css
+--             , css_highlight_github_css
+--             ])
+--         let hoogleForm name =
+--               let exact = False
+--                   mPackageName = Just pname
+--                   queryText = "" :: Text
+--                in $(widgetFile "hoogle-form")
+--         $(widgetFile "package")
+--   where enumerate = zip [0::Int ..]
+--         renderModules sname package = renderForest [] . moduleForest . map moduleName
+--           where
+--             renderForest _ [] = mempty
+--             renderForest pathRev trees =
+--               [hamlet|<ul .docs-list>
+--                         $forall tree <- trees
+--                           ^{renderTree tree}
+--               |]
+--               where
+--                 renderTree (Node{..}) = [hamlet|
+--                   <li>
+--                     $if isModule
+--                       <a href=@{haddockUrl sname (ModuleListingInfo path' package)}>#{path'}
+--                     $else
+--                       #{path'}
+--                     ^{renderForest pathRev' subModules}
+--                 |]
+--                   where
+--                     pathRev' = component:pathRev
+--                     path'    = T.intercalate "." $ reverse pathRev'
+
+--         maxDisplayedDeps :: Int
+--         maxDisplayedDeps = 40
+
+--         (packageDepsLink, packageRevDepsLink) =
+--           case mversion of
+--             Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
+--             Just (snap, version) ->
+--               let wrap f = SnapshotR snap $ f $ PNVNameVersion pname version
+--                in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
 
 -- | An identifier specified in a package. Because this field has
 -- quite liberal requirements, we often encounter various forms. A
@@ -244,13 +331,13 @@ renderEmail :: EmailAddress -> Text
 renderEmail = T.decodeUtf8 . toByteString
 
 getPackageSnapshotsR :: PackageNameP -> Handler Html
-getPackageSnapshotsR pn = track "Handler.Package.getPackageSnapshotsR" $
-  do snapshots <- getSnapshotsForPackage pn
-     defaultLayout
-       (do setTitle ("Packages for " >> toHtml pn)
-           $(combineStylesheets 'StaticR
-                                [css_font_awesome_min_css])
-           $(widgetFile "package-snapshots"))
+getPackageSnapshotsR pn =
+    track "Handler.Package.getPackageSnapshotsR" $ do
+        snapshots <- getSnapshotsForPackage pn Nothing
+        defaultLayout
+            (do setTitle ("Packages for " >> toHtml pn)
+                $(combineStylesheets 'StaticR [css_font_awesome_min_css])
+                $(widgetFile "package-snapshots"))
 
 renderNoPackages :: Int -> Text
 renderNoPackages n =

@@ -23,7 +23,7 @@ getStackageSdistR sname (PNVName pname) = track "Handler.StackageSdist.getStacka
 getStackageSdistR sname (PNVNameVersion pname version) = track "Handler.StackageSdist.getStackageSdistR" $ do
     version' <- versionHelper sname pname
     if version == version'
-        then packagePage (Just (sname, version)) pname >>= sendResponse
+        then packagePage (Just sname) pname >>= sendResponse
         else redirect $ SnapshotR sname $ StackageSdistR $ PNVNameVersion pname version'
 
 versionHelper :: SnapName -> PackageNameP -> Handler VersionP

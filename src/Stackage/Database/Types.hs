@@ -10,7 +10,6 @@ module Stackage.Database.Types
     , parseCompiler
     , StackageCron(..)
     , PantryHackageCabal(..)
-    , pantryHackageCabalToPackageIdentifierRevision
     , PantryTree(..)
     , PantryPackage(..)
     , SnapshotFile(..)
@@ -123,18 +122,6 @@ data PantryTree = PantryTree
 data PantryPackage =
   PantryHackagePackage !PantryHackageCabal !PantryTree
 
--- | Convert a pantry representation for hackage cabal package.
-pantryHackageCabalToPackageIdentifierRevision
-  :: PantryHackageCabal -> PackageIdentifierRevision
-pantryHackageCabalToPackageIdentifierRevision phc =
-    PackageIdentifierRevision pname pversion (CFIHash phcSHA256 (Just phcFileSize))
-  where
-    PantryHackageCabal { phcPackageName = PackageNameP pname
-                       , phcPackageVersion = VersionP pversion
-                       , phcSHA256
-                       , phcFileSize
-                       } = phc
-
 newtype Compiler =
     CompilerGHC { ghcVersion :: Version }
     deriving (Eq)
@@ -179,7 +166,7 @@ data SnapshotFile = SnapshotFile
    -- return (PantryHackageCabal pn v sha size)
 -- Issues with such switch:
 -- * CFILatest and CFIRevision do not make sense in stackage-snapshots
--- * Current implementation is faster
+-- * Implementation below is faster
 instance FromJSON PantryHackageCabal where
     parseJSON =
         withText "PantryHackageCabal" $ \txt -> do

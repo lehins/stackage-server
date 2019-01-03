@@ -39,7 +39,7 @@ helper depType mversion pname = track "Handler.PackageDeps.helper" $ do
     (case depType of
        Deps -> getDeps
        Revdeps -> getRevDeps) pname Nothing
-  let packagePage =
+  let packagePageLink =
         case mversion of
           Nothing -> PackageR pname
           Just (snap, version) -> SnapshotR snap $ StackageSdistR $ PNVNameVersion pname version
@@ -47,12 +47,12 @@ helper depType mversion pname = track "Handler.PackageDeps.helper" $ do
     let title = toHtml $
           (case depType of
             Deps -> "Dependencies"
-            Revdeps -> "Reverse dependencies ") ++ " for " ++ toPathPiece pname
+            Revdeps -> "Reverse dependencies") ++ " for " ++ toPathPiece pname
     setTitle title
     [whamlet|
       <h1>#{title}
       <p>
-        <a href=#{packagePage}>Return to package page
+        <a href=#{packagePageLink}>Return to package page
       <ul>
         $forall (name, range) <- deps
           <li>

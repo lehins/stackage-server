@@ -5,11 +5,11 @@ $newline never
             $if deprecated
               <h1 .package-deprecation-warning>
                 Deprecated
-              $if (not $ null ixInFavourOf)
+              $if (not $ null inFavourOf)
                 <div .in-favour-of>
                   In favour of
                   <div .in-favour-of-list>
-                    $forall (i, pn) <- ixInFavourOf
+                    $forall (i, pn) <- enumerate inFavourOf
                       $if i /= 0
                         , #
                       <a href="@{PackageR pn}">
@@ -17,14 +17,14 @@ $newline never
             <h1>
                #{pname}
             <p .synopsis>
-                #{synopsis}
+                #{piSynopsis}
                \ #
-               $maybe url <- homepage
+               $maybe url <- mhomepage
                    <a href="#{url}">
                        #{url}
 
             <table>
-              $forall displayedVersion <- mdisplayedVersion
+              $maybe displayedVersion <- mdisplayedVersion
                 <tr>
                   <td align=right>Version on this page:
                   <td>
@@ -41,10 +41,10 @@ $newline never
               <tr>
                 <td align="right">Latest on Hackage:
                 <td>
-                  <a href="https://hackage.haskell.org/package/#{pname}-#{latestVersion}">
-                    <span .version>#{latestVersion}
+                  <a href="https://hackage.haskell.org/package/#{pname}-#{hackageVersion}">
+                    <span .version>#{renderVersionRev hackageVersion hackageRevision}
 
-            $if null latests
+            $if isNothing mSnapName
                 <p .add-to-nightly>
                     This package is not currently in any snapshots. If you're interested in using it, we recommend #
                     <a href="https://github.com/fpco/stackage/#add-your-package">adding it to Stackage Nightly
@@ -57,7 +57,7 @@ $newline never
         <div .span12>
             <div .authorship>
                 <span .license>
-                    #{packageLicenseName package} licensed #
+                    #{piLicenseName} licensed #
                     $if null maintainers
                         and maintained #
                 $if not (null authors)
@@ -97,26 +97,26 @@ $newline never
                                     <a href="mailto:#{renderEmail email}">
                                         #{renderEmail email}
 
-            $maybe (sname, version, modules) <- mdocs
+            $maybe (sname, version, moduleForest) <- mdocs
                 <div .docs>
                     <h4>
                         Module documentation for #{version}
-                    $if null modules
+                    $if null moduleForest
                         <p>There are no documented modules for this package.
                     $else
                         ^{hoogleForm sname}
-                        ^{renderModules sname (PackageIdentifierP pname version) modules}
+                        ^{renderModules sname (PackageIdentifierP pname version) moduleForest}
 
-$if not (LT.null (LT.renderHtml (packageDescription package)))
+$if not (LT.null (LT.renderHtml piDescription))
     <div .markdown-container .readme-container>
         <div .container .content>
             <div .row>
                 <div .span12 .expanding>
-                    #{packageDescription package}
+                    #{piDescription}
                     <div .bottom-gradient>
                         <i class="fa fa-angle-down">
 
-$if not (LT.null (LT.renderHtml (packageChangelog package)))
+$if not (LT.null (LT.renderHtml piChangelog))
     <div .container .content id=changes>
        <div .row>
            <div .span12>
@@ -125,7 +125,7 @@ $if not (LT.null (LT.renderHtml (packageChangelog package)))
         <div .container>
             <div .row>
                 <div .span12 .expanding>
-                    #{packageChangelog package}
+                    #{piChangelog}
                     <div .bottom-gradient>
                         <i class="fa fa-angle-down">
 

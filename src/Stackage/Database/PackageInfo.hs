@@ -1,7 +1,7 @@
 {-# LANBUAGE NoImplicitPrelude #-}
 module Stackage.Database.PackageInfo
     ( PackageInfo(..)
-    , formatPackageInfo
+    , toPackageInfo
     , parseCabalBlob
     , extractDependencies
     ) where
@@ -45,8 +45,8 @@ data PackageInfo = PackageInfo
     }
 
 
-formatPackageInfo :: GenericPackageDescription -> PackageInfo
-formatPackageInfo gpd =
+toPackageInfo :: GenericPackageDescription -> PackageInfo
+toPackageInfo gpd =
     PackageInfo
         { piName = PackageNameP $ pkgName $ package pd
         , piVersion = VersionP $ pkgVersion $ package pd
@@ -71,18 +71,25 @@ extractDependencies gpd =
     getDeps' :: CondTree ConfVar [Dependency] a -> Map PackageNameP VersionRange
     getDeps' = getDeps (getCheckCond gpd)
 
+-- | Parse a cabal blob and throw an error on failure.
+parseCabalBlob :: ByteString -> GenericPackageDescription
+parseCabalBlob cabalBlob =
+    case snd $ runParseResult $ parseGenericPackageDescription cabalBlob of
+        Left err -> error $ "Problem parsing cabal blob: " <> show err
+        Right pgd -> pgd
 
-parseCabalBlob ::
-       (MonadIO f, MonadReader env f, HasLogFunc env)
-    => PackageName
+
+parseCabalBlobMaybe ::
+       (MonadIO m, MonadReader env m, HasLogFunc env)
+    => PackageNameP
     -> ByteString
-    -> f (Maybe GenericPackageDescription)
-parseCabalBlob packageName cabalBlob =
+    -> m (Maybe GenericPackageDescription)
+parseCabalBlobMaybe packageName cabalBlob =
     case snd $ runParseResult $ parseGenericPackageDescription cabalBlob of
         Left err ->
             Nothing <$
             logError
-                ("Problem parsing of cabal file '" <> display (PackageNameP packageName) <> "': " <>
+                ("Problem parsing cabal blob for '" <> display packageName <> "': " <>
                  displayShow err)
         Right pgd -> pure $ Just pgd
 

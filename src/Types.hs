@@ -6,6 +6,8 @@ module Types
     , PackageNameP(..)
     , unPackageName -- TODO: rename to packageNameText
     , VersionP(..)
+    , Revision(..)
+    , renderVersionRev
     , PackageIdentifierP(..)
     , PackageNameVersion(..)
     , HoogleVersion(..)
@@ -24,8 +26,7 @@ module Types
 import RIO
 import Data.Aeson
 import Data.Hashable (hashUsing)
---import Data.Builder (ToBuilder(..))
-import Text.Blaze (ToMarkup(..))
+import Text.Blaze (Markup, ToMarkup(..))
 import Database.Persist.Sql (PersistFieldSql (sqlType))
 import Database.Persist
 import qualified Data.Text as T
@@ -100,6 +101,16 @@ instance ToMarkup VersionP where
     toMarkup (VersionP v) = toMarkup $ versionString v
 instance ToBuilder VersionP Builder where
     toBuilder = getUtf8Builder . display
+
+instance ToMarkup Revision where
+    toMarkup (Revision r) = "rev:" <> toMarkup r
+
+renderVersionRev :: VersionP -> Revision -> Markup
+renderVersionRev version revision =
+    toMarkup version <>
+    if revision == Revision 0
+        then ""
+        else "@" <> toMarkup revision
 
 
 instance PathPiece PackageNameVersion where

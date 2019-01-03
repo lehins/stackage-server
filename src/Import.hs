@@ -21,11 +21,6 @@ import Stackage.Database.Types (ModuleListingInfo(..))
 import Formatting (format)
 import Formatting.Time (diff)
 
--- inRIO :: MonadHandler m => RIO (HandlerSite m) b -> m b
--- inRIO f = do
---   site <- getYesod
---   runRIO site f
-
 parseLtsPair :: Text -> Maybe (Int, Int)
 parseLtsPair t1 = do
     (x, t2) <- either (const Nothing) Just $ decimal t1

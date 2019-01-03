@@ -1,4 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE LambdaCase #-}
 module Stackage.Database
     ( PostgresConf (..)
     , HasStorage(..)
@@ -33,9 +34,13 @@ module Stackage.Database
     , getDeprecated
     , LatestInfo (..)
     , getLatests
+    , getHackageLatestVersion
+    , getVersionForSnapshot
+    , getSnapshotLatestVersion
     , getDeps
     , getRevDeps
     , getDepsCount
+    , getPackageInfo
     , Package (..)
     , getPackage
     , getSnapshotsForPackage
@@ -61,27 +66,15 @@ import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.ByteString.Char8 as BS8
 import RIO.FilePath
 import RIO.Directory (doesDirectoryExist)
---, removeFile, getAppUserDataDirectory, createDirectoryIfMissing)
 import Conduit
--- import qualified Data.Conduit.List as CL
--- import Web.PathPieces (toPathPiece)
 import qualified Codec.Archive.Tar as Tar
 import Database.Esqueleto.Internal.Language (From)
-import Distribution.PackageDescription (GenericPackageDescription)
-import Distribution.PackageDescription.Parsec
-       (parseGenericPackageDescription, runParseResult)
 import Distribution.Types.Version (mkVersion)
-import CMarkGFM
-import Stackage.Database.Haddock
-import System.FilePath (takeBaseName, takeExtension)
-import Text.Blaze.Html (Html, toHtml, preEscapedToHtml)
-import Yesod.Form.Fields (Textarea (..))
+import Text.Blaze.Html (Html)
 import Stackage.Database.Types
-import Stackage.Types
-import Stackage.Metadata
--- import Stackage.PackageIndex.Conduit
--- import Web.PathPieces (fromPathPiece)
-import Data.Yaml (decodeFileEither, decodeEither', decodeThrow)
+import Stackage.Database.PackageInfo
+import Stackage.Metadata (Deprecation(..))
+import Data.Yaml (decodeFileEither, decodeThrow)
 import Database.Persist
 import Database.Persist.Postgresql
 import Database.Persist.TH
@@ -276,12 +269,10 @@ createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
                 SNNightly day -> insert_ $ Nightly snapshotKey day
             hasErrs <-
                 forM sfPackages $ \(PantryHackagePackage phc PantryTree {..}) -> do
-                    let packageIdentifierRevision =
-                            pantryHackageCabalToPackageIdentifierRevision phc
-                        PantryHackageCabal packageName _ _ _ = phc
-                    mHackageCabalKey <- getHackageCabalKey packageIdentifierRevision
+                    let PantryHackageCabal packageName _ _ _ = phc
+                    mHackageCabalKey <- getHackageCabalKey phc
                     --mCabalBlob <- loadBlob (BlobKey ptSHA256 ptFileSize)
-                    --mCabalFile <- lift $ maybe (return Nothing) (parseCabalBlob packageName) mCabalBlob
+                    --mCabalFile <- lift $ maybe (return Nothing) (parseCabalBlobMaybe packageName) mCabalBlob
                     --mCabalFile <- lift (join <$> mapM (parseCabalBlob packageName) mCabalBlob)
                     case mHackageCabalKey of -- (,) <$> mHackageCabalKey <*> mCabalFile of
                         Nothing -> do
@@ -289,7 +280,7 @@ createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
                                 logError $
                                 "Couldn't find a valid hackage cabal file " <>
                                 "in pantry corresponding to: " <>
-                                display packageIdentifierRevision
+                                displayShow phc
                             return True
                         Just hackageCabalKey -> do
                             let isHidden = fromMaybe False $ Map.lookup packageName sfHidden
@@ -308,29 +299,6 @@ createOrUpdateSnapshot (SnapshotFile {..}, createdOn, updatedOn) = do
         Nothing -> do
             lift $ logInfo $ "Snapshot with name: " <> display sfName <> " already exists."
 
---getPackageInfo snapshot packageName mVersion
-
--- sourceBuildPlans :: MonadResource m => FilePath -> ConduitT i (SnapName, FilePath, Either (IO BuildPlan) (IO DocMap)) m ()
--- sourceBuildPlans root = do
---     forM_ ["lts-haskell", "stackage-nightly"] $ \repoName -> do
---         dir <- cloneOrUpdate root "fpco" repoName
---         sourceDirectory dir .| concatMapMC (go Left . fromString)
---         let docdir = dir </> "docs"
---         whenM (liftIO $ doesDirectoryExist docdir) $
---             sourceDirectory docdir .| concatMapMC (go Right . fromString)
---   where
---     go wrapper fp | Just name <- nameFromFP fp = liftIO $ do
---         let bp = decodeFileEither fp >>= either throwIO return
---         return $ Just (name, fp, wrapper bp)
---     go _ _ = return Nothing
-
---     nameFromFP fp = do
---         base <- T.stripSuffix ".yaml" $ T.pack $ takeFileName fp
---         fromPathPiece base
--- updateDeps hackageCabalKey gpd = do
---     let deps = extractDependencies gpd
---     insert_ $ HackageDep hackageCabalKey $ extractDeps gpd
---     return ()
 
 cloneOrUpdate ::
        (MonadReader env m, HasLogFunc env, HasProcessContext env, MonadIO m)
@@ -386,25 +354,6 @@ createStackageDatabase = do
     runConduitRes $
         sourceSnapshots .|
         mapM_C (lift . withStorage . createOrUpdateSnapshot)
-            -- (\(snap, _createdOn, _updatedOn) ->
-            --      lift $
-            --      logInfo $
-            --      "Parsed: " <> displayShow (sfName snap) <> " with: " <>
-            --      displayShow (length (sfPackages snap)) <>
-            --      " number of packages")
-        -- sourceBuildPlans rootDir .|
-        -- mapM_C
-        --     (\(sname, fp', eval) ->
-        --          flip runSqlPool pool $ do
-        --              let (typ, action) =
-        --                      case eval of
-        --                          Left bp -> ("build-plan", liftIO bp >>= addPlan sname fp')
-        --                          Right dm -> ("doc-map", liftIO dm >>= addDocMap sname)
-        --              let i = Imported sname typ
-        --              eres <- insertBy i
-        --              case eres of
-        --                  Left _ -> lift $ logInfo $ "Skipping: " <> displayShow fp'
-        --                  Right _ -> action)
     withStorage $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
 
 getDeprecated' :: [Deprecation] -> Tar.Entry -> [Deprecation]
@@ -438,133 +387,6 @@ getPackageId x = do
             , packageHomepage = ""
             , packageLicenseName = ""
             }
-
--- addPackage :: HasLogFunc env => Tar.Entry -> SqlPersistT (RIO env) ()
--- addPackage e =
---     case ("packages/" `L.isPrefixOf` fp && takeExtension fp == ".yaml", Tar.entryContent e) of
---         (True, Tar.NormalFile lbs _) ->
---           case decodeEither' $ LBS.toStrict lbs of
---             Left err ->
---               lift $ logInfo $ "ERROR: Could not parse " <>
---                   displayShow fp <> ": " <> displayShow err
---             Right pi -> onParse pi
---         _ -> return ()
---   where
---     onParse pi = do
---             let p = Package
---                     { packageName = T.pack base
---                     , packageLatest = dtDisplay $ piLatest pi
---                     , packageSynopsis = piSynopsis pi
---                     , packageDescription = renderContent (piDescription pi) (piDescriptionType pi)
---                     , packageChangelog = renderContent (piChangeLog pi) (piChangeLogType pi)
---                     , packageAuthor = piAuthor pi
---                     , packageMaintainer = piMaintainer pi
---                     , packageHomepage = piHomepage pi
---                     , packageLicenseName = piLicenseName pi
---                     }
-
---             mp <- getBy $ UniquePackage $ packageName p
---             pid <- case mp of
---                 Just (Entity pid _) -> do
---                     replace pid p
---                     return pid
---                 Nothing -> insert p
---             deleteWhere [DepUser ==. pid]
---             forM_ (Map.toList $ piBasicDeps pi) $ \(uses, range) -> insert_ Dep
---                 { depUser = pid
---                 , depUses = dtDisplay uses
---                 , depRange = dtDisplay range
---                 }
-
---     fp = Tar.entryPath e
---     base = takeBaseName fp
-
---     renderContent txt "markdown" = preEscapedToHtml $ commonmarkToHtml
---                                     [optSmart, optSafe]
---                                     [extTable, extAutolink]
---                                     txt
---     renderContent txt "haddock" = renderHaddock txt
---     renderContent txt _ = toHtml $ Textarea txt
-
--- addPlan
---   :: (MonadReader env m, MonadThrow m, MonadIO m, HasLogFunc env) =>
---      SnapName -> FilePath -> BuildPlan -> ReaderT SqlBackend m ()
--- addPlan name fp bp = do
---     lift $ logInfo $ "Adding build plan: " <> display (toPathPiece name)
---     created <-
---         case name of
---             SNNightly d -> return d
---             SNLts _ _ -> do
---                 let cp' = proc "git"
---                         [ "log"
---                         , "-1"
---                         , "--format=%ad"
---                         , "--date=short"
---                         , takeFileName fp
---                         ]
---                     cp = cp' { cwd = Just $ takeDirectory fp }
---                 t <- withCheckedProcess cp $ \ClosedStream out ClosedStream ->
---                     runConduit $ out .| decodeUtf8C .| foldC
---                 case readMaybe $ T.unpack $ T.concat $ take 1 $ T.words t of
---                     Just created -> return created
---                     Nothing -> do
---                         lift $ logInfo $ "Warning: unknown git log output: " <> displayShow t
---                         return $ fromGregorian 1970 1 1
---     sid <- insert Snapshot
---         { snapshotName = name
---         , snapshotGhc = dtDisplay $ siGhcVersion $ bpSystemInfo bp
---         , snapshotCreated = created
---         }
---     forM_ allPackages $ \(dtDisplay -> pname, (dtDisplay -> version, isCore)) -> do
---         pid <- getPackageId pname
---         insert_ SnapshotPackage
---             { snapshotPackageSnapshot = sid
---             , snapshotPackagePackage = pid
---             , snapshotPackageIsCore = isCore
---             , snapshotPackageVersion = version
---             }
---     case name of
---         SNLts x y -> insert_ Lts
---             { ltsSnap = sid
---             , ltsMajor = x
---             , ltsMinor = y
---             }
---         SNNightly d -> insert_ Nightly
---             { nightlySnap = sid
---             , nightlyDay = d
---             }
---   where
---     allPackages =
---         Map.toList
---             $ fmap (, True) (siCorePackages $ bpSystemInfo bp)
---            <> fmap ((, False) . ppVersion) (bpPackages bp)
-
--- addDocMap
---   :: (MonadReader env m, MonadIO m, HasLogFunc env) =>
---      SnapName -> Map Text PackageDocs -> ReaderT SqlBackend m ()
--- addDocMap name dm = do
---     sids <- selectKeysList [SnapshotName ==. name] []
---     case sids of
---       [] -> lift $ logError $ "Couldn't find a snapshot by the name: " <> displayShow name
---       [sid] -> do
---          lift $ logInfo $ "Adding doc map: " <> display (toPathPiece name)
---          forM_ (Map.toList dm) $ \(pkg, pd) -> do
---              pids <- selectKeysList [PackageName ==. pkg] []
---              pid <-
---                case pids of
---                  [pid] -> return pid
---                  _ -> error $ "addDocMap (1): " <> show (name, pkg, pids)
---              spids <- selectKeysList [SnapshotPackageSnapshot ==. sid, SnapshotPackagePackage ==. pid] []
---              case spids of
---                [spid] ->
---                  forM_ (Map.toList $ pdModules pd) $ \(mname, _paths) ->
---                      insert_ Module
---                          { modulePackage = spid
---                          , moduleName = mname
---                          }
---                -- FIXME figure out why this happens for the ghc package with GHC 8.2.1
---                _ -> lift $ logError $ "addDocMap (2): " <> displayShow (name, pkg, pid, spids)
---       xs -> lift $ logError $ "Impossible happened: unique key constraint failure: " <> displayShow xs
 
 
 run :: GetStackageDatabase env m => SqlPersistT IO a -> m a
@@ -765,6 +587,68 @@ getDeprecated name = run $ do
 
     getName = fmap (fmap packageName) . get
 
+getHackageCabalKey
+  :: MonadIO m
+  => PantryHackageCabal
+  -> ReaderT SqlBackend m (Maybe HackageCabalId)
+getHackageCabalKey (PantryHackageCabal {..}) =
+    fmap unSingle . listToMaybe <$>
+    rawSql
+        "SELECT hackage_cabal.id \
+         \FROM hackage_cabal, blob, package_name, version \
+         \WHERE hackage_cabal.name=package_name.id AND package_name.name=? \
+         \AND hackage_cabal.version=version.id AND version.version=? \
+         \AND hackage_cabal.cabal=blob.id AND blob.sha=? \
+         \AND blob.size=?"
+        [ toPersistValue phcPackageName
+        , toPersistValue phcPackageVersion
+        , toPersistValue phcSHA256
+        , toPersistValue phcFileSize
+        ]
+
+
+getHackageLatestVersion ::
+       GetStackageDatabase env m => PackageNameP -> m (Maybe (BlobId, VersionP, Revision))
+getHackageLatestVersion pname =
+    fmap (\(Single bid, Single v, Single rev) -> (bid, v, rev)) . listToMaybe <$>
+    run (rawSql
+             "SELECT hackage_cabal.cabal, version.version, hackage_cabal.revision \
+              \FROM hackage_cabal, package_name, version \
+              \WHERE package_name.name = ? \
+              \AND hackage_cabal.name = package_name.id \
+              \AND hackage_cabal.version = version.id \
+              \ORDER BY (version.version, hackage_cabal.revision) DESC \
+              \LIMIT 1"
+             [toPersistValue pname])
+
+getVersionForSnapshot ::
+       GetStackageDatabase env m => SnapName -> PackageNameP -> m (Maybe (BlobId, VersionP, Revision))
+getVersionForSnapshot sname pname =
+    fmap (\(Single bid, Single v, Single rev) -> (bid, v, rev)) . listToMaybe <$>
+    run (rawSql
+             "SELECT hackage_cabal.cabal, version.version, hackage_cabal.revision \
+             \FROM snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
+             \WHERE snapshot_hackage_package.snapshot = snapshot.id \
+             \AND snapshot_hackage_package.cabal = hackage_cabal.id \
+             \AND snapshot.name = ? \
+             \AND package_name.name = ? \
+             \AND hackage_cabal.name = package_name.id \
+             \AND hackage_cabal.version = version.id \
+             \ORDER BY (version.version, hackage_cabal.revision) DESC \
+             \LIMIT 1"
+             [toPersistValue sname, toPersistValue pname])
+
+getSnapshotLatestVersion ::
+       GetStackageDatabase env m
+    => PackageNameP
+    -> m (Maybe (SnapName, BlobId, VersionP, Revision))
+getSnapshotLatestVersion pname = do
+    snaps <- getSnapshotsForPackage pname (Just 1)
+    return $ listToMaybe [(s, bid, v, rev) | (s, _, bid, v, rev) <- snaps]
+
+getPackageInfo :: GetStackageDatabase env m => BlobId -> m PackageInfo
+getPackageInfo blobId = toPackageInfo . parseCabalBlob <$> run (loadBlobById blobId)
+
 
 getLatests :: GetStackageDatabase env m
            => PackageNameP -- ^ package name
@@ -844,14 +728,12 @@ getRevDeps pname mcount = run $ do
     toPair (E.Value x, E.Value y) = (x, y)
 
 getDepsCount :: GetStackageDatabase env m => PackageNameP -> m (Int, Int)
-getDepsCount pname = run $ (,)
-  <$> (do
-          mp <- getBy $ UniquePackage pname
-          case mp of
-            Nothing -> return 0
-            Just (Entity pid _) -> count [DepUser ==. pid]
-      )
-  <*> count [DepUses ==. pname]
+getDepsCount pname =
+    run $ (,) <$>
+    (getBy (UniquePackage pname) >>= \case
+         Nothing             -> return 0
+         Just (Entity pid _) -> count [DepUser ==. pid]) <*>
+    count [DepUses ==. pname]
 
 getPackage :: GetStackageDatabase env m => PackageNameP -> m (Maybe (Entity Package))
 getPackage = run . getBy . UniquePackage
@@ -859,19 +741,28 @@ getPackage = run . getBy . UniquePackage
 getSnapshotsForPackage
     :: GetStackageDatabase env m
     => PackageNameP
-    -> m [(SnapName, Compiler, VersionP, Revision)]
-getSnapshotsForPackage pname =
-    map (\(Single sn, Single c, Single v, Single rev) -> (sn, c, v, rev)) <$>
+    -> Maybe Int
+    -> m [(SnapName, Compiler, BlobId, VersionP, Revision)]
+getSnapshotsForPackage pname mlimit =
+    map (\(Single sn, Single c, Single bid, Single v, Single rev) -> (sn, c, bid, v, rev)) <$>
     run (rawSql
-             "SELECT snapshot.name, snapshot.compiler, version.version, hackage_cabal.revision \
-                 \FROM snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
-                 \WHERE snapshot_hackage_package.cabal = hackage_cabal.id \
-                 \AND snapshot_hackage_package.snapshot = snapshot.id \
-                 \AND package_name.name = ? \
-                 \AND hackage_cabal.name = package_name.id \
-                 \AND hackage_cabal.version = version.id \
-                 \ORDER BY version.version DESC, snapshot.created DESC"
-             [toPersistValue pname])
+             ("SELECT snapshot.name, \
+                     \snapshot.compiler, \
+                     \hackage_cabal.cabal, \
+                     \version.version, \
+                     \hackage_cabal.revision \
+             \FROM snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
+             \WHERE snapshot_hackage_package.cabal = hackage_cabal.id \
+             \AND snapshot_hackage_package.snapshot = snapshot.id \
+             \AND package_name.name = ? \
+             \AND hackage_cabal.name = package_name.id \
+             \AND hackage_cabal.version = version.id \
+             \ORDER BY (version.version, snapshot.created) DESC" <>
+              mlimitQ)
+             ([toPersistValue pname] ++ mlimitVal))
+  where
+    (mlimitQ, mlimitVal) = maybe ("", []) ((,) " LIMIT ?" . pure . toPersistValue) mlimit
+
 
 -- | Count snapshots that belong to a specific SnapshotBranch
 countSnapshots :: (GetStackageDatabase env m) => Maybe SnapshotBranch -> m Int
