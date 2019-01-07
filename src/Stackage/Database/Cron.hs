@@ -125,7 +125,8 @@ stackageServerCron = do
           stackage = StackageCron { scPantryConfig = pantryConfig
                                   , scStackageRoot = stackageRootDir
                                   , scProcessContext = defaultProcessContext
-                                  , scLogFunc = logFunc }
+                                  , scLogFunc = logFunc
+                                  , sfForceFullUpdate = True }
       in runRIO stackage runStackageUpdate
 
 runStackageUpdate :: RIO StackageCron ()

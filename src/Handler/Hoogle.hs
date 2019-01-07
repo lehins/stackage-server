@@ -4,14 +4,15 @@ module Handler.Hoogle where
 
 import           Control.DeepSeq (NFData(..))
 import           Data.Data (Data)
+import qualified Data.Text as T
 import           Data.Text.Read (decimal)
 import qualified Hoogle
 import           Import
+import           Stackage.Database
+import           Stackage.Database.Types (ModuleListingInfo(..))
 import           Text.Blaze.Html (preEscapedToHtml)
-import Stackage.Database
-import qualified Data.Text as T
 import qualified Text.HTML.DOM
-import Text.XML.Cursor (fromDocument, ($//), content)
+import           Text.XML.Cursor (fromDocument, ($//), content)
 
 getHoogleDB :: SnapName -> Handler (Maybe FilePath)
 getHoogleDB name = track "Handler.Hoogle.getHoogleDB" $ do
@@ -102,7 +103,7 @@ data HoogleQueryInput = HoogleQueryInput
     , hqiOffsetBy    :: Int
     , hqiExact       :: Bool
     }
-    deriving (Eq, Read, Show, Data, Typeable, Ord, Generic)
+    deriving (Eq, Read, Show, Data, Ord, Generic)
 
 data HoogleQueryOutput = HoogleQueryOutput [HoogleResult] (Maybe Int) -- ^ Int == total count
     deriving (Read, Typeable, Data, Show, Eq, Generic)
@@ -114,19 +115,19 @@ data HoogleResult = HoogleResult
     , hrTitle   :: String -- ^ HTML
     , hrBody    :: String -- ^ plain text
     }
-    deriving (Eq, Read, Show, Data, Typeable, Ord, Generic)
+    deriving (Eq, Read, Show, Data, Ord, Generic)
 
 data PackageLink = PackageLink
     { plName :: String
     , plURL  :: String
     }
-    deriving (Eq, Read, Show, Data, Typeable, Ord, Generic)
+    deriving (Eq, Read, Show, Data, Ord, Generic)
 
 data ModuleLink = ModuleLink
-    { mlName :: String
+    { mlName :: ModuleNameP
     , mlURL :: String
     }
-    deriving (Eq, Read, Show, Data, Typeable, Ord, Generic)
+    deriving (Eq, Read, Show, Data, Ord, Generic)
 
 instance NFData HoogleResult
 instance NFData PackageLink
@@ -168,7 +169,7 @@ runHoogleQuery renderUrl snapshot hoogledb HoogleQueryInput {..} =
         }
       where sources = toList $ do
               (packageLink', mname, mkModuleLink) <- targetLinks renderUrl snapshot target
-              Just (packageLink', [ModuleLink mname $ mkModuleLink $ T.pack mname])
+              Just (packageLink', [ModuleLink mname $ mkModuleLink mname])
 
             moduleLink = do
               (_packageLink, mname, mkModuleLink) <- targetLinks renderUrl snapshot target
@@ -176,7 +177,7 @@ runHoogleQuery renderUrl snapshot hoogledb HoogleQueryInput {..} =
               let doc = Text.HTML.DOM.parseLBS $ encodeUtf8 $ pack targetItem
                   cursor = fromDocument doc
                   item = T.concat $ cursor $// content
-              mkModuleLink <$> T.stripPrefix "module " item
+              mkModuleLink . fromString . T.unpack <$> T.stripPrefix "module " item
 
             packageLink = do
               guard (isNothing targetPackage)
@@ -195,7 +196,7 @@ targetLinks ::
        (Route App -> Text)
     -> SnapName
     -> Hoogle.Target
-    -> Maybe (PackageLink, String, Text -> String)
+    -> Maybe (PackageLink, ModuleNameP, ModuleNameP -> String)
 targetLinks renderUrl sname Hoogle.Target {..} = do
     (pname, _) <- targetPackage
     (mname, _) <- targetModule
@@ -203,7 +204,7 @@ targetLinks renderUrl sname Hoogle.Target {..} = do
     let mkMli modName = ModuleListingInfo modName packageIdentifierP
         packageLink = PackageLink pname (makePackageLink pname)
         mkModuleLink modName = T.unpack (renderUrl (haddockUrl sname (mkMli modName)))
-    return (packageLink, mname, mkModuleLink)
+    return (packageLink, fromString mname, mkModuleLink)
 
 makePackageLink :: String -> String
 makePackageLink pkg = "/package/" ++ pkg

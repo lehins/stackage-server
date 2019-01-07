@@ -7,7 +7,8 @@ module Types
     , unPackageName -- TODO: rename to packageNameText
     , VersionP(..)
     , Revision(..)
-    , renderVersionRev
+    , VersionRev(..)
+    , ModuleNameP(..)
     , PackageIdentifierP(..)
     , PackageNameVersion(..)
     , HoogleVersion(..)
@@ -18,6 +19,7 @@ module Types
     , GhcMajorVersionFailedParse(..)
     , ghcMajorVersionToText
     , ghcMajorVersionFromText
+    , dtDisplay
     , SupportedArch(..)
     , Year
     , Month(Month)
@@ -26,7 +28,7 @@ module Types
 import RIO
 import Data.Aeson
 import Data.Hashable (hashUsing)
-import Text.Blaze (Markup, ToMarkup(..))
+import Text.Blaze (ToMarkup(..))
 import Database.Persist.Sql (PersistFieldSql (sqlType))
 import Database.Persist
 import qualified Data.Text as T
@@ -41,6 +43,11 @@ import Web.PathPieces
 import Data.Hashable
 import Database.Esqueleto.Internal.Language
 import ClassyPrelude.Yesod (ToBuilder(..))
+import Distribution.ModuleName (ModuleName(..))
+import qualified Distribution.Text as DT (Text, display)
+
+dtDisplay :: (DT.Text a, IsString b) => a -> b
+dtDisplay = fromString . DT.display
 
 data SnapshotBranch = LtsMajorBranch Int
                     | LtsBranch
@@ -75,6 +82,7 @@ data PackageIdentifierP =
     PackageIdentifierP !PackageNameP
                        !VersionP
     deriving (Eq, Ord, Show)
+
 instance PathPiece PackageIdentifierP where
     toPathPiece (PackageIdentifierP x y) = T.concat [toPathPiece x, "-", toPathPiece y]
     fromPathPiece t = do
@@ -82,6 +90,9 @@ instance PathPiece PackageIdentifierP where
         (tName, '-') <- T.unsnoc tName'
         guard $ not (T.null tName || T.null tVer)
         PackageIdentifierP <$> fromPathPiece tName <*> fromPathPiece tVer
+instance ToMarkup PackageIdentifierP where
+    toMarkup = toMarkup . toPathPiece
+
 instance Hashable PackageNameP where
   hashWithSalt = hashUsing unPackageName
 instance ToBuilder PackageNameP Builder where
@@ -105,12 +116,11 @@ instance ToBuilder VersionP Builder where
 instance ToMarkup Revision where
     toMarkup (Revision r) = "rev:" <> toMarkup r
 
-renderVersionRev :: VersionP -> Revision -> Markup
-renderVersionRev version revision =
-    toMarkup version <>
-    if revision == Revision 0
-        then ""
-        else "@" <> toMarkup revision
+data VersionRev = VersionRev !VersionP !(Maybe Revision) deriving (Eq, Show)
+
+instance ToMarkup VersionRev where
+    toMarkup (VersionRev version mrev) =
+        toMarkup version <> maybe "" (("@" <>) . toMarkup) mrev
 
 
 instance PathPiece PackageNameVersion where
@@ -228,12 +238,26 @@ type Year = Int
 newtype Month = Month Int
   deriving (Eq, Read, Show, Ord)
 instance PathPiece Month where
-  toPathPiece (Month i)
-    | i < 10 = T.pack $ '0' : show i
-    | otherwise = tshow i
-  fromPathPiece "10" = Just $ Month 10
-  fromPathPiece "11" = Just $ Month 11
-  fromPathPiece "12" = Just $ Month 12
-  fromPathPiece (T.unpack -> ['0', c])
-    | '1' <= c && c <= '9' = Just $ Month $ ord c - ord '0'
-  fromPathPiece _ = Nothing
+    toPathPiece (Month i)
+        | i < 10 = T.pack $ '0' : show i
+        | otherwise = tshow i
+    fromPathPiece "10" = Just $ Month 10
+    fromPathPiece "11" = Just $ Month 11
+    fromPathPiece "12" = Just $ Month 12
+    fromPathPiece (T.unpack -> ['0', c])
+        | '1' <= c && c <= '9' = Just $ Month $ ord c - ord '0'
+    fromPathPiece _ = Nothing
+
+
+
+newtype ModuleNameP = ModuleNameP {unModuleNameP :: ModuleName }
+  deriving (Eq, Ord, Show, Read, Data, NFData, IsString)
+instance Display ModuleNameP where
+  display = dtDisplay . unModuleNameP
+instance PersistField ModuleNameP where
+  toPersistValue (ModuleNameP pn) = PersistText $ dtDisplay pn
+  fromPersistValue v = ModuleNameP . fromString . T.unpack <$> fromPersistValue v
+instance PersistFieldSql ModuleNameP where
+  sqlType _ = SqlString
+instance ToMarkup ModuleNameP where
+  toMarkup = dtDisplay . unModuleNameP

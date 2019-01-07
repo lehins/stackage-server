@@ -3,7 +3,6 @@ module Import
     ( module Import
     ) where
 
-import RIO (RIO, runRIO)
 import Control.Monad.Trans.Class (lift)
 import ClassyPrelude.Yesod as Import
 import Foundation as Import
@@ -20,6 +19,7 @@ import Stackage.Database (SnapName)
 import Stackage.Database.Types (ModuleListingInfo(..))
 import Formatting (format)
 import Formatting.Time (diff)
+import Distribution.ModuleName (fromComponents, components)
 
 parseLtsPair :: Text -> Maybe (Int, Int)
 parseLtsPair t1 = do
@@ -33,16 +33,18 @@ packageUrl sname pkgname pkgver = SnapshotR sname sdistR
   where
     sdistR = StackageSdistR (PNVNameVersion pkgname pkgver)
 
-haddockUrl :: SnapName
-           -> ModuleListingInfo
-           -> Route App
-haddockUrl sname mli = HaddockR sname
-    [ toPathPiece $ mliPackageIdentifier mli
-    , omap toDash (mliName mli) ++ ".html"
-    ]
-  where
-    toDash '.' = '-'
-    toDash c = c
+haddockUrl :: SnapName -> ModuleListingInfo -> Route App
+haddockUrl sname mli =
+    HaddockR
+        sname
+        [toPathPiece (mliPackageIdentifier mli), moduleHaddockFileName (mliModuleName mli)]
+
+moduleHaddockFileName :: ModuleNameP -> Text
+moduleHaddockFileName (ModuleNameP moduleName) =
+    intercalate "-" (pack <$> components moduleName) <> ".html"
+
+moduleNameFromComponents :: [Text] -> ModuleNameP
+moduleNameFromComponents = ModuleNameP . fromComponents . map unpack
 
 track
     :: MonadIO m

@@ -3,17 +3,20 @@ module Stackage.Database.PackageInfo
     ( PackageInfo(..)
     , toPackageInfo
     , parseCabalBlob
+    , parseCabalBlobMaybe
     , extractDependencies
+    , getModuleNames
     ) where
 
+import           Data.Coerce
 import qualified Data.Text as T
 import           Distribution.Compiler (CompilerFlavor(GHC))
-import           Distribution.Package (Dependency(..), PackageIdentifier(..), PackageName)
+import           Distribution.Package (Dependency(..), PackageIdentifier(..))
 import           Distribution.Package.ModuleForest
 import           Distribution.PackageDescription
                          (CondTree(..), Condition(..), ConfVar(..),
                           Flag(flagName, flagDefault), GenericPackageDescription,
-                          PackageDescription, author, packageDescription,
+                          author, packageDescription,
                           condLibrary, condExecutables, package, synopsis,
                           description, genPackageFlags, homepage, license, maintainer)
 import           Distribution.PackageDescription.Parsec
@@ -25,11 +28,11 @@ import           Distribution.Types.Library (exposedModules)
 import           Distribution.Types.VersionRange
                          (VersionRange, intersectVersionRanges, normaliseVersionRange, withinRange)
 import           Distribution.Version (mkVersion, simplifyVersionRange)
-import           Pantry.Types (PackageNameP(..), VersionP(..))
 import           RIO
 import qualified RIO.Map as Map
 import           Stackage.Database.Haddock (renderHaddock)
 import           Text.Blaze.Html (Html)
+import           Types (ModuleNameP(..), PackageNameP(..), VersionP(..))
 
 data PackageInfo = PackageInfo
     { piName         :: PackageNameP
@@ -41,7 +44,6 @@ data PackageInfo = PackageInfo
     , piMaintainer   :: Text
     , piHomepage     :: Text
     , piLicenseName  :: Text
-    , piModuleForest :: ModuleForest
     }
 
 
@@ -57,11 +59,13 @@ toPackageInfo gpd =
         , piMaintainer = T.pack $ maintainer pd
         , piHomepage = T.pack $ homepage pd
         , piLicenseName = T.pack $ prettyShow $ license pd
-        , piModuleForest = moduleForest $ maybe [] toForest $ condLibrary gpd
-        -- TODO: add reexported modules feature
         }
   where pd = packageDescription gpd
-        toForest = exposedModules . condTreeData
+
+
+getModuleNames :: GenericPackageDescription -> [ModuleNameP]
+getModuleNames = maybe [] (coerce . exposedModules . condTreeData) . condLibrary
+
 
 extractDependencies :: GenericPackageDescription -> Map PackageNameP VersionRange
 extractDependencies gpd =

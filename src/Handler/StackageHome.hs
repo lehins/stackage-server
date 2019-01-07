@@ -11,7 +11,7 @@ import Import
 import Data.These
 import Data.Time (FormatTime)
 import Stackage.Database
-import Stackage.Database.Types (isLts)
+import Stackage.Database.Types (ModuleListingInfo(..), PackageListingInfo(..), isLts)
 import Stackage.Snapshot.Diff
 
 getStackageHomeR :: SnapName -> Handler TypedContent
@@ -152,7 +152,7 @@ getSnapshotPackagesR name = track "Handler.StackageHome.getSnapshotPackagesR" $
 getDocsR :: SnapName -> Handler Html
 getDocsR name = track "Handler.StackageHome.getDocsR" $ do
     Entity sid _ <- lookupSnapshot name >>= maybe notFound return
-    mlis <- getSnapshotModules sid
+    mlis <- getSnapshotModules sid True
     render <- getUrlRender
     let mliUrl mli = render $ haddockUrl name mli
     defaultLayout $ do

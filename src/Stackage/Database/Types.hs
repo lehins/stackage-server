@@ -13,6 +13,7 @@ module Stackage.Database.Types
     , PantryTree(..)
     , PantryPackage(..)
     , SnapshotFile(..)
+    , HackageCabalInfo(..)
     , PackageListingInfo(..)
     , ModuleListingInfo(..)
     , LatestInfo(..)
@@ -27,6 +28,7 @@ import           Database.Persist
 import           Database.Persist.Sql hiding (LogFunc)
 import           Pantry.SHA256
 import           Pantry.Types
+import           Pantry.Storage       (HackageCabalId, BlobId)
 import           RIO
 import           RIO.Process          (HasProcessContext (..), ProcessContext)
 import           RIO.Time
@@ -88,10 +90,11 @@ parseSnapName t0 = nightly <|> lts
 
 
 data StackageCron = StackageCron
-    { scPantryConfig   :: !PantryConfig
-    , scStackageRoot   :: !FilePath
-    , scLogFunc        :: !LogFunc
-    , scProcessContext :: !ProcessContext
+    { scPantryConfig    :: !PantryConfig
+    , scStackageRoot    :: !FilePath
+    , scLogFunc         :: !LogFunc
+    , scProcessContext  :: !ProcessContext
+    , sfForceFullUpdate :: !Bool
     }
 
 instance HasLogFunc StackageCron where
@@ -236,8 +239,17 @@ instance ToJSON PackageListingInfo where
             ]
 
 
+data HackageCabalInfo = HackageCabalInfo
+  { hciCabalId     :: !HackageCabalId
+  , hciBlobId      :: !BlobId
+  , hciPackageName :: !PackageNameP
+  , hciVersion     :: !VersionP
+  , hciRevision    :: !(Maybe Revision)
+  } deriving (Show, Eq)
+
+
 data ModuleListingInfo = ModuleListingInfo
-    { mliName              :: !Text  -- TODO: Change to ModuleName
+    { mliModuleName        :: !ModuleNameP
     , mliPackageIdentifier :: !PackageIdentifierP
     } deriving Show
 

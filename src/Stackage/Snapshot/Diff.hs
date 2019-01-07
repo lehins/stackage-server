@@ -10,19 +10,18 @@ module Stackage.Snapshot.Diff
   , WithSnapshotNames(..)
   ) where
 
-import           RIO
-import qualified Data.Text as T (commonPrefixes)
-import           Data.Align
+import           ClassyPrelude (sortOn, toCaseFold)
 import           Data.Aeson
+import           Data.Align
 import qualified Data.HashMap.Strict as HashMap
+import qualified Data.Text as T (commonPrefixes)
 import           Data.These
-import           Stackage.Database (SnapshotId, PackageListingInfo(..),
-                                    GetStackageDatabase, getPackages)
-import           Stackage.Database.Types (SnapName)
-import           Types
+import           RIO
+import           Stackage.Database (SnapshotId, GetStackageDatabase, getPackages)
+import           Stackage.Database.Types (SnapName, PackageListingInfo(..))
 import           Stackage.Types (dtDisplay)
+import           Types
 import           Web.PathPieces
-import ClassyPrelude (sortOn, toCaseFold)
 
 data WithSnapshotNames a
     = WithSnapshotNames SnapName SnapName a

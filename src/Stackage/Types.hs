@@ -9,6 +9,7 @@ module Stackage.Types
   , simpleParse
   ) where
 
+import Types (dtDisplay)
 import qualified Distribution.Text               as DT
 import ClassyPrelude.Conduit
 import Data.Aeson
@@ -51,9 +52,6 @@ instance FromJSON PackageDocs where
     parseJSON = withObject "PackageDocs" $ \o -> PackageDocs
         <$> o .: "version"
         <*> o .: "modules"
-
-dtDisplay :: (DT.Text a, IsString b) => a -> b
-dtDisplay = fromString . DT.display
 
 data ParseFailedException = ParseFailedException TypeRep Text
     deriving (Show, Typeable)
