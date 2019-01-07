@@ -36,7 +36,7 @@ import qualified RIO.Map                       as Map
 import           RIO.Process                   (mkDefaultProcessContext)
 import qualified RIO.Text                      as T
 import           Stackage.Database
-import           Stackage.Database.Types       (StackageCron (..))
+import           Stackage.Database.Types       (StackageCron (..), Deprecation(..))
 import           Stackage.PackageIndex.Conduit
 import           Web.PathPieces                (toPathPiece)
 import           Pantry                        (defaultHackageSecurityConfig)
@@ -44,6 +44,7 @@ import           Pantry.Types                  (HpackExecutable (HpackBundled),
                                                 PantryConfig (..))
 import           Path                          (parseAbsDir, toFilePath)
 import           System.Environment            (getEnv)
+import           Network.HTTP.Simple (parseRequest, httpJSONEither, getResponseBody)
 
 hoogleKey :: SnapName -> Text
 hoogleKey name = T.concat
@@ -67,35 +68,51 @@ withResponseUnliftIO req man f = withRunInIO $ \ run -> withResponse req man (ru
 newHoogleLocker ::
        (HasLogFunc env, MonadIO m) => env -> Manager -> m (SingleRun SnapName (Maybe FilePath))
 newHoogleLocker env man = do
-  mkSingleRun hoogleLocker
+    mkSingleRun hoogleLocker
   where
     hoogleLocker :: MonadIO m => SnapName -> m (Maybe FilePath)
-    hoogleLocker name = runRIO env $ do
-      let fp = T.unpack $ hoogleKey name
-          fptmp = fp <.> "tmp"
-      exists <- doesFileExist fp
-      if exists
-        then return $ Just fp
-        else do
-          req' <- parseRequest $ T.unpack $ hoogleUrl name
-          let req = req' {decompress = const False}
-          withResponseUnliftIO req man $ \res ->
-            if responseStatus res == status200
-              then do
-                createDirectoryIfMissing True $ takeDirectory fptmp
-                runConduitRes $ bodyReaderSource (responseBody res) .| ungzip .| sinkFile fptmp
-                renamePath fptmp fp
-                return $ Just fp
-              else do
-                -- TODO: log exceptions (i.e. instead of toPrint)
-                -- logDebug
-                return Nothing
+    hoogleLocker name =
+        runRIO env $ do
+            let fp = T.unpack $ hoogleKey name
+                fptmp = fp <.> "tmp"
+            exists <- doesFileExist fp
+            if exists
+                then return $ Just fp
+                else do
+                    req' <- parseRequest $ T.unpack $ hoogleUrl name
+                    let req = req' {decompress = const False}
+                    withResponseUnliftIO req man $ \res ->
+                        if responseStatus res == status200
+                            then do
+                                createDirectoryIfMissing True $ takeDirectory fptmp
+                                runConduitRes $
+                                    bodyReaderSource (responseBody res) .| ungzip .| sinkFile fptmp
+                                renamePath fptmp fp
+                                return $ Just fp
+                            else do
+                                return Nothing
 
 
 initStorage :: IO StackageDatabase
 initStorage = do
     connstr <- encodeUtf8 . T.pack <$> getEnv "PGSTRING"
     openStackageDatabase PostgresConf {pgPoolSize = 5, pgConnStr = connstr}
+
+
+hackageDeprecatedUrl :: Request
+hackageDeprecatedUrl = "https://hackage.haskell.org/packages/deprecated.json"
+
+getHackageDeprecations ::
+       (HasLogFunc env, MonadReader env m, MonadIO m) => m [Deprecation]
+getHackageDeprecations = do
+    jsonResponseDeprecated <- httpJSONEither hackageDeprecatedUrl
+    case getResponseBody jsonResponseDeprecated of
+        Left err -> do
+            logError $
+                "There was an error parsing deprecated.json file: " <>
+                fromString (displayException err)
+            return []
+        Right deprecated -> return deprecated
 
 
 stackageServerCron :: IO ()
@@ -126,12 +143,12 @@ stackageServerCron = do
                                   , scStackageRoot = stackageRootDir
                                   , scProcessContext = defaultProcessContext
                                   , scLogFunc = logFunc
-                                  , sfForceFullUpdate = True }
+                                  , sfForceFullUpdate = False }
       in runRIO stackage runStackageUpdate
 
 runStackageUpdate :: RIO StackageCron ()
 runStackageUpdate = do
-    createStackageDatabase
+    createStackageDatabase getHackageDeprecations
 
 
 -- #if !DEVELOPMENT

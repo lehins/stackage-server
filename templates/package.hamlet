@@ -1,8 +1,8 @@
 $newline never
-<div .container #snapshot-home .content :deprecated:.deprecated>
+<div .container #snapshot-home .content :isDeprecated:.deprecated>
     <div .row>
         <div .span12>
-            $if deprecated
+            $if isDeprecated
               <h1 .package-deprecation-warning>
                 Deprecated
               $if (not $ null inFavourOf)

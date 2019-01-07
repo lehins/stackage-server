@@ -17,6 +17,7 @@ module Stackage.Database.Types
     , PackageListingInfo(..)
     , ModuleListingInfo(..)
     , LatestInfo(..)
+    , Deprecation(..)
     ) where
 
 import           Data.Aeson
@@ -258,3 +259,19 @@ data LatestInfo = LatestInfo
     { liSnapName :: !SnapName
     , liVersion  :: !VersionP
     } deriving (Show, Eq, Ord)
+
+
+
+data Deprecation = Deprecation
+    { depPackage    :: !PackageNameP
+    , depInFavourOf :: !(Set PackageNameP)
+    }
+instance ToJSON Deprecation where
+    toJSON d = object
+        [ "deprecated-package" .= depPackage d
+        , "in-favour-of" .= depInFavourOf d
+        ]
+instance FromJSON Deprecation where
+    parseJSON = withObject "Deprecation" $ \o -> Deprecation
+        <$> o .: "deprecated-package"
+        <*> o .: "in-favour-of"

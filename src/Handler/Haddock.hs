@@ -94,7 +94,13 @@ takeUntilChunk fullNeedle =
                 Just needle' -> loop (front . (bs:)) needle'
                 Nothing -> yieldMany (front [bs]) >> start
 
-data CheckNeedle = CNNotFound | CNFound !ByteString !ByteString | CNPartial !ByteString !ByteString !ByteString
+data CheckNeedle
+    = CNNotFound
+    | CNFound !ByteString
+              !ByteString
+    | CNPartial !ByteString
+                !ByteString
+                !ByteString
 
 checkNeedle :: ByteString -> ByteString -> CheckNeedle
 checkNeedle needle bs0 =

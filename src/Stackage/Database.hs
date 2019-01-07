@@ -58,20 +58,17 @@ import RIO.Process
 import qualified RIO.Text as T
 import qualified RIO.Set as Set
 import qualified RIO.Map as Map
-import qualified RIO.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.ByteString.Char8 as BS8
 import RIO.FilePath
 import RIO.Directory (doesDirectoryExist)
 import Conduit
-import qualified Codec.Archive.Tar as Tar
+import qualified Data.List  as L
 import Database.Esqueleto.Internal.Language (From)
-import Distribution.Types.Version (mkVersion)
 import Text.Blaze.Html (Html)
 import Stackage.Database.Types
 import Stackage.Database.PackageInfo
-import Stackage.Metadata (Deprecation(..))
-import Data.Yaml (decodeFileEither, decodeThrow)
+import Data.Yaml (decodeFileEither)
 import Database.Persist
 import Database.Persist.Postgresql
 import Database.Persist.TH
@@ -86,7 +83,6 @@ import Pantry.Types
     , Storage(Storage)
     , VersionP(..)
     , Revision(..)
-    , BlobKey(..)
     )
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
@@ -159,8 +155,8 @@ Dep
     range Text
     UniqueDep user uses
 Deprecated
-    package PackageId
-    inFavorOf [PackageId]
+    package PackageNameId
+    inFavourOf [PackageNameId]
     UniqueDeprecated package
 |]
 
@@ -269,7 +265,7 @@ createOrUpdateSnapshot ::
        Bool -> (SnapshotFile, Day, UTCTime) -> ReaderT SqlBackend (RIO StackageCron) ()
 createOrUpdateSnapshot forceUpdate (SnapshotFile {..}, createdOn, updatedOn) = do
     eSnapshotKey <- insertBy (Snapshot sfName sfCompiler createdOn Nothing)
-    -- Decide if creation or update is necessary:
+    -- Decide if creation or an update is necessary:
     mSnapKey <-
         lift $
         case eSnapshotKey of
@@ -366,8 +362,8 @@ getSchema = do
         Right [Entity _ (Schema v)] -> return $ Just v
         _ -> return Nothing
 
-createStackageDatabase :: RIO StackageCron ()
-createStackageDatabase = do
+createStackageDatabase :: RIO StackageCron [Deprecation] -> RIO StackageCron ()
+createStackageDatabase getDeprecations = do
     logInfo "Entering createStackageDatabase"
     actualSchema <- getSchema
     let schemaMatch = actualSchema == Just currentSchema
@@ -381,8 +377,11 @@ createStackageDatabase = do
     unless schemaMatch $ withStorage $ insert_ $ Schema currentSchema
     didUpdate <- updateHackageIndex True (Just "Stackage Server cron job")
     case didUpdate of
-        UpdateOccurred -> logInfo "Updated hackage index"
-        NoUpdateOccurred -> logInfo "No new packages in hackage index"
+        UpdateOccurred -> do
+            logInfo "Updated hackage index. Getting deprecated info now"
+            getDeprecations >>= withStorage . mapM_ addDeprecated
+        NoUpdateOccurred -> do
+            logInfo "No new packages in hackage index"
     runConduitRes $
         sourceSnapshots .| mapM_C (lift . withStorage . createOrUpdateSnapshot forceFullUpdate)
     withStorage $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
@@ -408,37 +407,49 @@ insertHackageDeps hackageCabalKey dependencies =
                 lift $ logWarn $ "Couldn't find a dependency in Pantry with name: " <> display dep
 
 
-getDeprecated' :: [Deprecation] -> Tar.Entry -> [Deprecation]
-getDeprecated' orig e =
-    case (Tar.entryPath e, Tar.entryContent e) of
-        ("deprecated.yaml", Tar.NormalFile lbs _) ->
-            case decodeThrow $ LBS.toStrict lbs of
-                Just x -> x
-                Nothing -> orig
-        _ -> orig
+getPackageNameId :: MonadIO m => PackageNameP -> ReaderT SqlBackend m (Maybe PackageNameId)
+getPackageNameId pname = fmap entityKey <$> getBy (UniquePackageName pname)
 
-addDeprecated :: Deprecation -> SqlPersistT (ResourceT IO) ()
-addDeprecated (Deprecation name others) = do
-    name' <- getPackageId name
-    others' <- mapM getPackageId $ Set.toList others
-    insert_ $ Deprecated name' others'
+addDeprecated ::
+       (HasLogFunc env, MonadReader env m, MonadIO m) => Deprecation -> ReaderT SqlBackend m ()
+addDeprecated (Deprecation pname inFavourOfNameSet) = do
+    mPackageNameId <- getPackageNameId pname
+    case mPackageNameId of
+        Just packageNameId -> do
+            let inFavourOfNames = Set.toList inFavourOfNameSet
+            inFavourOfAllIds <- mapM getPackageNameId inFavourOfNames
+            let (badNames, inFavourOfIds) =
+                    partitionEithers $
+                    L.zipWith
+                        (\name mid -> maybe (Left name) Right mid)
+                        inFavourOfNames
+                        inFavourOfAllIds
+            insert_ $ Deprecated packageNameId inFavourOfIds
+            when (not (null badNames)) $
+                lift $
+                logError $
+                mconcat
+                    ("Couldn't find in Pantry names of packages in deprecation list: " :
+                     L.intersperse ", " (map display badNames))
+        Nothing ->
+            lift $
+            logError $
+            "Package name: " <> display pname <> " from deprecation list was not found in Pantry."
 
-getPackageId :: MonadIO m => PackageNameP -> ReaderT SqlBackend m (Key Package)
-getPackageId x = do
-    keys' <- selectKeysList [PackageName ==. x] [LimitTo 1]
-    case keys' of
-        k:_ -> return k
-        [] -> insert Package
-            { packageName = x
-            , packageLatest = VersionP (mkVersion [0,0,0,0])
-            , packageSynopsis = "Metadata not found"
-            , packageDescription = "Metadata not found"
-            , packageChangelog = mempty
-            , packageAuthor = ""
-            , packageMaintainer = ""
-            , packageHomepage = ""
-            , packageLicenseName = ""
-            }
+
+getDeprecated :: GetStackageDatabase env m => PackageNameP -> m (Bool, [PackageNameP])
+getDeprecated pname =
+    run $ do
+        getPackageNameId pname >>= \case
+            Just pnid -> do
+                getBy (UniqueDeprecated pnid) >>= \case
+                    Just (Entity _ (Deprecated _ inFavourOfIds)) -> do
+                        names <- mapM getPackageNameById inFavourOfIds
+                        return (True, PackageNameP <$> catMaybes names)
+                    Nothing -> return defRes
+            Nothing -> return defRes
+  where
+    defRes = (False, [])
 
 
 run :: GetStackageDatabase env m => SqlPersistT IO a -> m a
@@ -619,22 +630,6 @@ lookupSnapshotPackage sid pname = run $ do
         Nothing -> return Nothing
         Just (Entity pid _) -> getBy $ UniqueSnapshotPackage sid pid
 
-getDeprecated :: GetStackageDatabase env m => PackageNameP -> m (Bool, [PackageNameP])
-getDeprecated name = run $ do
-    pids <- selectKeysList [PackageName ==. name] []
-    case pids of
-        [pid] -> do
-            mdep <- getBy $ UniqueDeprecated pid
-            case mdep of
-                Nothing -> return defRes
-                Just (Entity _ (Deprecated _ favors)) -> do
-                    names <- mapM getName favors
-                    return (True, catMaybes names)
-        _ -> return defRes
-  where
-    defRes = (False, [])
-
-    getName = fmap (fmap packageName) . get
 
 getHackageCabal
   :: MonadIO m

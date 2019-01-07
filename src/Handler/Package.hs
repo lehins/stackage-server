@@ -76,7 +76,7 @@ packagePage :: Maybe (SnapName, HackageCabalInfo)
             -> PackageNameP
             -> Handler Html
 packagePage mSnapCabal pname = track "Handler.Package.packagePage" $ checkSpam pname $ do
-    (deprecated, inFavourOf) <- getDeprecated pname
+    (isDeprecated, inFavourOf) <- getDeprecated pname
 
     -- FIXME: handle dependencies
     let deps' = [] :: [(PackageNameP, Text)]

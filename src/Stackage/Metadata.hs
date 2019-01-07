@@ -1,9 +1,6 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE OverloadedStrings  #-}
-module Stackage.Metadata
-    ( PackageInfo (..)
-    , Deprecation (..)
-    ) where
+module Stackage.Metadata () where
 
 import           Control.Applicative           ((<$>), (<*>))
 import           Data.Aeson                    (FromJSON (..), ToJSON (..),
@@ -79,17 +76,3 @@ instance FromJSON PackageInfo where
             name' <- parseDistText name
             range' <- parseDistText range
             return (PackageNameP name', range')
-
-data Deprecation = Deprecation
-    { depPackage    :: !PackageNameP
-    , depInFavourOf :: !(Set PackageNameP)
-    }
-instance ToJSON Deprecation where
-    toJSON d = object
-        [ "deprecated-package" .= depPackage d
-        , "in-favour-of" .= depInFavourOf d
-        ]
-instance FromJSON Deprecation where
-    parseJSON = withObject "Deprecation" $ \o -> Deprecation
-        <$> o .: "deprecated-package"
-        <*> o .: "in-favour-of"
