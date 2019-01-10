@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE LambdaCase #-}
 module Stackage.Database
@@ -202,99 +203,112 @@ instance (HasStorage env, MonadIO m) => GetStackageDatabase env (ReaderT env m) 
 instance HasStorage env => GetStackageDatabase env (RIO env) where
     getStackageDatabase = view storageG
 
--- TODO: Source an IO action that retrieves the SnapshotFile, there is no need to parse each yaml
--- file every time, it's only neede when there has been an update (known from commit) or the
--- snapshot is new (name is known from the file).
-sourceSnapshots
-  :: ConduitT a (SnapshotFile, Day, UTCTime) (ResourceT (RIO StackageCron)) ()
+sourceSnapshots ::
+       ConduitT a (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile)) (ResourceT (RIO StackageCron)) ()
 sourceSnapshots = do
     rootDir <- scStackageRoot <$> lift ask
     gitDir <- lift $ cloneOrUpdate rootDir "commercialhaskell" "stackage-snapshots"
-    sourceDirectoryDeep False (gitDir </> "lts") .| concatMapMC (parseLts gitDir)
-    sourceDirectoryDeep False (gitDir </> "nightly") .| concatMapMC (parseNightly gitDir)
+    sourceDirectoryDeep False (gitDir </> "lts") .| concatMapMC (getLtsParser gitDir)
+    sourceDirectoryDeep False (gitDir </> "nightly") .| concatMapMC (getNightlyParser gitDir)
   where
-    parseSnapshot gitDir fp snapName = do
-        esnap <- liftIO $ decodeFileEither fp
-        case esnap of
-            Right snap
-                | snapName == sfName snap -> do
-                    let gitLog args =
-                            lift $
-                            withWorkingDir gitDir $
-                            proc "git" ("log" : (args ++ [fp])) readProcessStdout_
-                    lastCommitTimestamps <- gitLog ["-1", "--format=%cD"]
-                    authorDates <- gitLog ["--reverse", "--date=short", "--format=%ad"]
-                    let parseGitDate fmt dates = do
-                            date <- listToMaybe $ LBS8.lines dates
-                            parseTimeM False defaultTimeLocale fmt (LBS8.unpack date)
-                    let snapAndDates = do
-                            createdOn <- parseGitDate "%F" authorDates
-                            updatedOn <- parseGitDate rfc822DateFormat lastCommitTimestamps
-                            return (snap, createdOn, updatedOn)
-                    when (isNothing snapAndDates) $
-                        (lift $
-                         logError $
-                         "Issue parsing the git log timestamps: " <>
-                         displayShow (lastCommitTimestamps, authorDates))
-                    return snapAndDates
-            Right snap -> do
-                logError $
-                    "Snapshot name mismath. Received: " <> displayShow (sfName snap) <>
-                    " in the file: " <>
-                    display (T.pack fp)
+    getSnapshotParser gitDir fp mCreateDate snapName = do
+        let gitLog args =
+                withWorkingDir gitDir $ proc "git" ("log" : (args ++ [fp])) readProcessStdout_
+        let parseGitDate fmt dates =
+                try $ do
+                    date <-
+                        maybe (error "Git dates list is empty") return $
+                        listToMaybe $ LBS8.lines dates
+                    parseTimeM False defaultTimeLocale fmt (LBS8.unpack date)
+            parseSnapshot updatedOn = do
+                esnap <- liftIO $ decodeFileEither fp
+                case esnap of
+                    Right snap
+                        | snapName == sfName snap -> do
+                            let createdOn =
+                                    sfCreatedOn snap <|> mCreateDate <|> Just (utctDay updatedOn)
+                            return $ Just snap {sfCreatedOn = createdOn}
+                    Right snap -> do
+                        logError $
+                            "Snapshot name mismath. Received: " <> displayShow (sfName snap) <>
+                            " in the file: " <>
+                            display (T.pack fp)
+                        return Nothing
+                    Left exc -> do
+                        logError $ display $ T.pack $ displayException exc
+                        return Nothing
+        lastCommitTimestamps <- lift $ gitLog ["-1", "--format=%cD"]
+        eUpdatedOn <- parseGitDate rfc822DateFormat lastCommitTimestamps
+        case eUpdatedOn of
+            Left (exc :: SomeException) -> do
+                logError $ "Error parsing git commit date: " <> fromString (displayException exc)
                 return Nothing
-            Left exc -> do
-                lift $ logError $ display $ T.pack $ displayException exc
-                return Nothing
-    parseLts gitDir fp = do
+            Right updatedOn -> do
+                env <- lift ask
+                return $ Just $ (,,) snapName updatedOn $ runRIO env (parseSnapshot updatedOn)
+    getLtsParser gitDir fp = do
         case mapM (BS8.readInt . BS8.pack) $ take 2 $ reverse (splitPath fp) of
-            Just [(minor, ".yaml"), (major, "/")] -> parseSnapshot gitDir fp $ SNLts major minor
+            Just [(minor, ".yaml"), (major, "/")] ->
+                getSnapshotParser gitDir fp Nothing $ SNLts major minor
             _ -> do
-                lift $
-                    logError
-                        ("Couldn't parse the filepath into an LTS version: " <> display (T.pack fp))
+                logError
+                    ("Couldn't parse the filepath into an LTS version: " <> display (T.pack fp))
                 return Nothing
-    parseNightly gitDir fp = do
+    getNightlyParser gitDir fp = do
         case mapM (BS8.readInt . BS8.pack) $ take 3 $ reverse (splitPath fp) of
             Just [(day, ".yaml"), (month, "/"), (year, "/")]
                 | Just date <- fromGregorianValid (fromIntegral year) month day ->
-                    parseSnapshot gitDir fp $ SNNightly date
+                    getSnapshotParser gitDir fp (Just date) $ SNNightly date
             _ -> do
-                lift $
-                    logError
-                        ("Couldn't parse the filepath into a Nightly date: " <> display (T.pack fp))
+                logError
+                    ("Couldn't parse the filepath into a Nightly date: " <> display (T.pack fp))
                 return Nothing
 
 createOrUpdateSnapshot ::
-       Bool -> (SnapshotFile, Day, UTCTime) -> ReaderT SqlBackend (RIO StackageCron) ()
-createOrUpdateSnapshot forceUpdate (SnapshotFile {..}, createdOn, updatedOn) = do
-    eSnapshotKey <- insertBy (Snapshot sfName sfCompiler createdOn Nothing)
+       Bool
+    -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
+    -> ReaderT SqlBackend (RIO StackageCron) ()
+createOrUpdateSnapshot forceUpdate (snapName, updatedOn, parseSnapshotFile) = do
+    mSnap <- getBy (UniqueSnapshot snapName)
     -- Decide if creation or an update is necessary:
-    mSnapKey <-
+    mKeySnapFile <-
         lift $
-        case eSnapshotKey of
-            Left (Entity _key snap)
+        case mSnap of
+            Just (Entity _key snap)
                 | snapshotUpdatedOn snap == Just updatedOn && not forceUpdate -> do
                     logInfo $
-                        "Snapshot with name: " <> display sfName <>
+                        "Snapshot with name: " <> display snapName <>
                         " already exists and is up to date."
                     return Nothing
-            Left (Entity key snap)
+            Just (Entity key snap)
                 | Nothing <- snapshotUpdatedOn snap -> do
                     logWarn $
-                        "Snapshot with name: " <> display sfName <>
+                        "Snapshot with name: " <> display snapName <>
                         " did not finish updating last time."
-                    return $ Just key
-            Left (Entity key _snap) -> do
+                    fmap (Just key, ) <$> parseSnapshotFile
+            Just (Entity key _snap) -> do
                 unless forceUpdate $
                     logWarn $
-                    "Snapshot with name: " <> display sfName <> " was updated, applying new patch."
-                return $ Just key
-            Right key -> return $ Just key -- New snapshot go with full update
-    forM_ mSnapKey $ \snapshotKey -> do
-        case sfName of
-            SNLts major minor -> void $ insertUnique $ Lts snapshotKey major minor
-            SNNightly day -> void $ insertUnique $ Nightly snapshotKey day
+                    "Snapshot with name: " <> display snapName <> " was updated, applying new patch."
+                fmap (Just key, ) <$> parseSnapshotFile
+            Nothing -> fmap (Nothing, ) <$> parseSnapshotFile
+    -- Add new snapshot to the database, when necessary
+    mKeySnapFileAdded <-
+        case mKeySnapFile of
+            Just (Just snapKey, sf) -> return $ Just (snapKey, sf)
+            Just (Nothing, sf@SnapshotFile {sfName, sfCompiler, sfCreatedOn})
+                | Just createdOn <- sfCreatedOn -> do
+                    mSnapKey <- insertUnique (Snapshot sfName sfCompiler createdOn Nothing)
+                    case sfName of
+                        SNLts major minor
+                            | Just snapKey <- mSnapKey ->
+                                void $ insertUnique $ Lts snapKey major minor
+                        SNNightly day
+                            | Just snapKey <- mSnapKey -> void $ insertUnique $ Nightly snapKey day
+                        _ -> return ()
+                    return $ (, sf) <$> mSnapKey
+            _ -> return Nothing
+    forM_ mKeySnapFileAdded $ \(snapshotKey, SnapshotFile {sfName, sfHidden, sfPackages}) -> do
         pantryUpdatesSucceeded <-
             forM sfPackages $ \(PantryHackagePackage phc PantryTree {..}) -> do
                 let PantryHackageCabal packageName _ _ _ = phc
@@ -309,12 +323,15 @@ createOrUpdateSnapshot forceUpdate (SnapshotFile {..}, createdOn, updatedOn) = d
                         return False
                     Just (hackageCabalKey, cabalBlob) -> do
                         mCabalFile <- lift $ parseCabalBlobMaybe packageName cabalBlob
-                        fmap (fromMaybe False) $ forM mCabalFile $ \gpd -> do
-                            let isHidden = fromMaybe False $ Map.lookup packageName sfHidden
-                            _ <- insertBy $ SnapshotHackagePackage snapshotKey hackageCabalKey isHidden
-                            insertHackagePackageModules hackageCabalKey (getModuleNames gpd)
-                            insertHackageDeps hackageCabalKey (extractDependencies gpd)
-                            return True
+                        fmap (fromMaybe False) $
+                            forM mCabalFile $ \gpd -> do
+                                let isHidden = fromMaybe False $ Map.lookup packageName sfHidden
+                                _ <-
+                                    insertBy $
+                                    SnapshotHackagePackage snapshotKey hackageCabalKey isHidden
+                                insertHackagePackageModules hackageCabalKey (getModuleNames gpd)
+                                insertHackageDeps hackageCabalKey (extractDependencies gpd)
+                                return True
         docUpdateSucceeded <- checkForDocs sfName
         if and pantryUpdatesSucceeded && docUpdateSucceeded
             then do
@@ -429,7 +446,10 @@ addDeprecated (Deprecation pname inFavourOfNameSet) = do
                         (\name mid -> maybe (Left name) Right mid)
                         inFavourOfNames
                         inFavourOfAllIds
-            insert_ $ Deprecated packageNameId inFavourOfIds
+            _ <- upsertBy
+                (UniqueDeprecated packageNameId)
+                (Deprecated packageNameId inFavourOfIds)
+                [DeprecatedInFavourOf =. inFavourOfIds]
             when (not (null badNames)) $
                 lift $
                 logError $

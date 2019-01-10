@@ -161,11 +161,12 @@ instance PersistFieldSql Compiler where
 
 
 data SnapshotFile = SnapshotFile
-    { sfName     :: !SnapName
-    , sfCompiler :: !Compiler
-    , sfPackages :: ![PantryPackage]
-    , sfHidden   :: !(Map PackageNameP Bool)
-    , sfFlags    :: !(Map PackageNameP (Map Text Bool))
+    { sfName      :: !SnapName
+    , sfCompiler  :: !Compiler
+    , sfPackages  :: ![PantryPackage]
+    , sfHidden    :: !(Map PackageNameP Bool)
+    , sfFlags     :: !(Map PackageNameP (Map Text Bool))
+    , sfCreatedOn :: !(Maybe Day) -- TODO: switch to UTCTime and get it from yaml
     }
 
 -- QUESTION: Potentially switch to `parsePackageIdentifierRevision`:
@@ -223,6 +224,7 @@ instance FromJSON SnapshotFile where
             sfPackages <- obj .: "packages"
             sfHidden <- obj .:? "hidden" .!= mempty
             sfFlags <- obj .:? "flags" .!= mempty
+            sfCreatedOn <- obj .:? "created_on"
             return SnapshotFile {..}
 
 
