@@ -8,6 +8,7 @@ module Types
     , VersionP(..)
     , Revision(..)
     , VersionRev(..)
+    , PackageVersionRev(..)
     , ModuleNameP(..)
     , PackageIdentifierP(..)
     , PackageNameVersion(..)
@@ -121,6 +122,11 @@ data VersionRev = VersionRev !VersionP !(Maybe Revision) deriving (Eq, Show)
 instance ToMarkup VersionRev where
     toMarkup (VersionRev version mrev) =
         toMarkup version <> maybe "" (("@" <>) . toMarkup) mrev
+
+data PackageVersionRev = PackageVersionRev !PackageNameP !VersionRev deriving (Eq, Show)
+
+instance ToMarkup PackageVersionRev where
+    toMarkup (PackageVersionRev pname version) = toMarkup pname <> "-" <> toMarkup version
 
 
 instance PathPiece PackageNameVersion where

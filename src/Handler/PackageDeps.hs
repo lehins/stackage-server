@@ -6,55 +6,89 @@ module Handler.PackageDeps
   , getSnapshotPackageRevDepsR
   ) where
 
+import Handler.Package (deduceHackageCabalInfo)
+import Handler.StackageSdist (pnvToHackageCabalInfo)
 import Import
+import Types (PackageVersionRev(..))
 import Stackage.Database
+import Stackage.Database.Types (HackageCabalInfo(..))
 
 getPackageDepsR :: PackageNameP -> Handler Html
-getPackageDepsR = packageDeps Nothing
+getPackageDepsR pname = do
+    (mSnapName, hci, _hackageLatest) <- deduceHackageCabalInfo Nothing pname
+    case mSnapName of
+        Nothing -> redirect $ PackageR pname
+        Just snapName -> helper Deps snapName hci
+            -- helper
+            --     (getForwardDeps snapName (hciCabalId hci) Nothing)
+            --     Deps
+            --     (getPackagePageLink (Just (snapName, hciVersion hci)) pname)
+            --     pname
+                     -- (getForwardDeps sname (hciCabalId hci) Nothing)
+                     -- Deps
+                     -- (getPackagePageLink (Just (sname, hciVersion hci)) (hciPackageName hci))
+                     -- (hciPackageName hci)
 
 getSnapshotPackageDepsR :: SnapName -> PackageNameVersion -> Handler Html
-getSnapshotPackageDepsR snap (PNVNameVersion pname version) =
-  packageDeps (Just (snap, version)) pname
-getSnapshotPackageDepsR _ _ = notFound
-
-packageDeps :: Maybe (SnapName, VersionP) -> PackageNameP -> Handler Html
-packageDeps = helper Deps
+getSnapshotPackageDepsR snapName pnv =
+    pnvToHackageCabalInfo snapName pnv (\_ _ -> notFound) $ \isSameVersion hci ->
+        if isSameVersion
+            then helper Deps snapName hci
+            else redirect $
+                 SnapshotR snapName $
+                 SnapshotPackageDepsR $ PNVNameVersion (hciPackageName hci) (hciVersion hci)
 
 getPackageRevDepsR :: PackageNameP -> Handler Html
-getPackageRevDepsR = packageRevDeps Nothing
+getPackageRevDepsR pname = do
+    (mSnapName, hci, _hackageLatest) <- deduceHackageCabalInfo Nothing pname
+    case mSnapName of
+        Nothing -> redirect $ PackageR pname
+        Just snapName -> helper RevDeps snapName hci
+            -- helper
+            --     (getReverseDeps snapName (hciCabalId hci) Nothing)
+            --     RevDeps
+            --     (getPackagePageLink (Just (snapName, hciVersion hci)) pname)
+            --     pname
 
 getSnapshotPackageRevDepsR :: SnapName -> PackageNameVersion -> Handler Html
-getSnapshotPackageRevDepsR snap (PNVNameVersion pname version) =
-  packageRevDeps (Just (snap, version)) pname
-getSnapshotPackageRevDepsR _ _ = notFound
+getSnapshotPackageRevDepsR snapName pnv =
+    pnvToHackageCabalInfo snapName pnv (\_ _ -> notFound) $ \isSameVersion hci ->
+        if isSameVersion
+            then helper RevDeps snapName hci
+            else redirect $
+                 SnapshotR snapName $
+                 SnapshotPackageRevDepsR $ PNVNameVersion (hciPackageName hci) (hciVersion hci)
 
-packageRevDeps :: Maybe (SnapName, VersionP) -> PackageNameP -> Handler Html
-packageRevDeps = helper Revdeps
 
-data DepType = Deps | Revdeps
+getPackagePageLink :: SnapName -> PackageVersionRev -> Route App
+getPackagePageLink snapName (PackageVersionRev pname (VersionRev version _)) =
+  SnapshotR snapName $ StackageSdistR $ PNVNameVersion pname version
 
-helper :: DepType -> Maybe (SnapName, VersionP) -> PackageNameP -> Handler Html
-helper depType mversion pname = track "Handler.PackageDeps.helper" $ do
-  deps <-
-    (case depType of
-       Deps -> getDeps
-       Revdeps -> getRevDeps) pname Nothing
-  let packagePageLink =
-        case mversion of
-          Nothing -> PackageR pname
-          Just (snap, version) -> SnapshotR snap $ StackageSdistR $ PNVNameVersion pname version
-  defaultLayout $ do
-    let title = toHtml $
-          (case depType of
-            Deps -> "Dependencies"
-            Revdeps -> "Reverse dependencies") ++ " for " ++ toPathPiece pname
-    setTitle title
-    [whamlet|
-      <h1>#{title}
-      <p>
-        <a href=#{packagePageLink}>Return to package page
-      <ul>
-        $forall (name, range) <- deps
-          <li>
-            <a href=@{PackageR name} title=#{range}>#{name}
-    |]
+data DepType = Deps | RevDeps
+
+helper :: DepType -> SnapName -> HackageCabalInfo -> Handler Html
+helper depType snapName hci =
+    track "Handler.PackageDeps.helper" $ do
+        let (depsGetter, header) =
+                case depType of
+                    Deps -> (getForwardDeps, "Dependencies for ")
+                    RevDeps -> (getReverseDeps, "Reverse dependencies on ")
+        deps <- depsGetter snapName (hciCabalId hci) Nothing
+        render <- getUrlRender
+        let title = toHtml $ header ++ toPathPiece (hciPackageName hci)
+            packagePageUrl =
+                render $
+                SnapshotR snapName $
+                StackageSdistR $ PNVNameVersion (hciPackageName hci) (hciVersion hci)
+        defaultLayout $ do
+            setTitle title
+            [whamlet|
+              <h1>#{title}
+              <h3>There is a total of #{length deps} dependencies in <em>#{snapName}</em>
+              <p>
+                <a href=#{packagePageUrl}>&lt;&lt; Return to package page
+              <ul>
+                $forall (depNameVerRev, verRange) <- deps
+                  <li>
+                    <a href=@{getPackagePageLink snapName depNameVerRev} title="'#{hciPackageName hci}' version bounds: #{verRange}">#{depNameVerRev}
+            |]

@@ -28,12 +28,13 @@ import qualified Data.Text.Read       as T (decimal)
 import           Database.Persist
 import           Database.Persist.Sql hiding (LogFunc)
 import           Pantry.SHA256
+import           Pantry.Storage       (BlobId, HackageCabalId)
 import           Pantry.Types
-import           Pantry.Storage       (HackageCabalId, BlobId)
 import           RIO
 import           RIO.Process          (HasProcessContext (..), ProcessContext)
 import           RIO.Time
 import           Stackage.Types       (dtDisplay)
+import           Text.Blaze           (ToMarkup (..))
 import           Types
 import           Web.PathPieces
 
@@ -74,6 +75,9 @@ instance FromJSON SnapName where
 showSnapName :: SnapName -> Text
 showSnapName (SNLts x y) = T.concat ["lts-", T.pack (show x), ".", T.pack (show y)]
 showSnapName (SNNightly d) = "nightly-" <> T.pack (show d)
+
+instance ToMarkup SnapName where
+  toMarkup = toMarkup . showSnapName
 
 instance Display SnapName where
   display = display . showSnapName
@@ -256,9 +260,9 @@ data ModuleListingInfo = ModuleListingInfo
 
 
 data LatestInfo = LatestInfo
-    { liSnapName :: !SnapName
-    , liVersion  :: !VersionP
-    } deriving (Show, Eq, Ord)
+    { liSnapName   :: !SnapName
+    , liVersionRev :: !VersionRev
+    } deriving (Show, Eq)
 
 
 

@@ -9,6 +9,7 @@ module Handler.Package
     , packagePage
     , getPackageBadgeR
     , renderNoPackages
+    , deduceHackageCabalInfo
     ) where
 
 import           Data.Char
@@ -20,7 +21,6 @@ import           Distribution.Package.ModuleForest
 import           Graphics.Badge.Barrier
 import           Control.Lens
 import           Import
-import           Text.Blaze (toMarkup)
 import qualified Text.Blaze.Html.Renderer.Text as LT
 import           Text.Email.Validate
 import           Stackage.Database
@@ -72,74 +72,94 @@ checkSpam pname inner = do
         $(widgetFile "spam-package")
       else inner
 
-packagePage :: Maybe (SnapName, HackageCabalInfo)
-            -> PackageNameP
-            -> Handler Html
-packagePage mSnapCabal pname = track "Handler.Package.packagePage" $ checkSpam pname $ do
-    (isDeprecated, inFavourOf) <- getDeprecated pname
-
-    -- FIXME: handle dependencies
-    let deps' = [] :: [(PackageNameP, Text)]
-        revdeps' = [] :: [(PackageNameP, Text)]
-        (depsCount, revdepsCount) = (0,0)
-        consTuple x0 (x1, x2, x3) = (x0, x1, x2, x3)
-    latests <- getLatests pname
-    --let latests = []
-    -- short circuit in case when we don't know about a package with such name
+deduceHackageCabalInfo ::
+       (GetStackageDatabase env m, MonadHandler m)
+    => Maybe (SnapName, HackageCabalInfo)
+    -> PackageNameP
+    -> m (Maybe SnapName, HackageCabalInfo, HackageCabalInfo)
+deduceHackageCabalInfo mSnapCabal pname = do
     hackageLatest <- getHackageLatestVersion pname >>= maybe notFound return
     (mSnapName, hci) <- case mSnapCabal of
       Just (snapName, hci) -> return (Just snapName, hci)
       Nothing -> maybe (Nothing, hackageLatest) (first Just) <$> getSnapshotLatestVersion pname
-    -- When package is present in a snapshot, also pullout modules that have documentaion available
-    (PackageInfo{..}, packageModules) <- getPackageInfo hci (isJust mSnapName)
-    let mdocs = (, piVersion, packageModules) <$> mSnapName
-        hackageVersionRev = VersionRev (hciVersion hackageLatest) (hciRevision hackageLatest)
-        -- Only show current version ("Version on this page") if it doesn't match latest known:
-        mdisplayedVersion = guard (hci /= hackageLatest) >>
-                            Just (VersionRev (hciVersion hci) (hciRevision hci))
-        (packageDepsLink, packageRevDepsLink) =
-               case mSnapName of
-                 Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
-                 Just snap ->
-                   let wrap f = SnapshotR snap $ f $ PNVNameVersion pname (hciVersion hci)
-                    in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
+    return (mSnapName, hci, hackageLatest)
 
-    let mhomepage = case T.strip (piHomepage) of
-                     x | null x -> Nothing
-                       | otherwise -> Just x
-        deps = enumerate deps'
-        revdeps = enumerate revdeps'
-        authors = enumerate (parseIdentitiesLiberally piAuthor)
-        maintainers = let ms = enumerate (parseIdentitiesLiberally piMaintainer)
-                      in if ms == authors
-                            then []
-                            else ms
-    defaultLayout $ do
-        setTitle $ toHtml piName
-        $(combineScripts 'StaticR
-                          [ js_highlight_js
-                          ])
-        $(combineStylesheets 'StaticR
-            [ css_font_awesome_min_css
-            , css_highlight_github_css
-            ])
-        let hoogleForm name =
-              let exact = False
-                  mPackageName = Just pname
-                  queryText = "" :: Text
-               in $(widgetFile "hoogle-form")
-        $(widgetFile "package")
-  where enumerate = zip [0::Int ..]
-        renderModules sname packageIdentifier = renderForest [] . moduleForest . coerce
-          where
-            renderForest _ [] = mempty
-            renderForest pathRev trees =
-              [hamlet|<ul .docs-list>
+packagePage :: Maybe (SnapName, HackageCabalInfo)
+            -> PackageNameP
+            -> Handler Html
+packagePage mSnapCabal pname =
+    track "Handler.Package.packagePage" $
+    checkSpam pname $ do
+        (isDeprecated, inFavourOf) <- getDeprecated pname
+        latests <- getLatests pname
+        --let latests = []
+        -- short circuit in case when we don't know about a package with such name
+        hackageLatest <- getHackageLatestVersion pname >>= maybe notFound return
+        (mSnapName, hci) <-
+            case mSnapCabal of
+                Just (snapName, hci) -> return (Just snapName, hci)
+                Nothing ->
+                    maybe (Nothing, hackageLatest) (first Just) <$> getSnapshotLatestVersion pname
+        -- When package is present in a snapshot, also pullout modules that have documentaion available
+        (PackageInfo {..}, packageModules) <- getPackageInfo hci (isJust mSnapName)
+        (deps, depsCount, revDeps, revDepsCount) <-
+            case mSnapName of
+                Nothing -> return ([], 0, [], 0)
+                Just snapName -> do
+                    deps <- getForwardDeps snapName (hciCabalId hci) $ Just maxDisplayedDeps
+                    revDeps <- getReverseDeps snapName (hciCabalId hci) (Just maxDisplayedDeps)
+                    (depsCount, revDepsCount) <- getDepsCount snapName (hciCabalId hci)
+                    return
+                        ( map (first unPackageRev) deps
+                        , depsCount
+                        , map (first unPackageRev) revDeps
+                        , revDepsCount)
+        let mdocs = (, piVersion, packageModules) <$> mSnapName
+            hackageVersionRev = VersionRev (hciVersion hackageLatest) (hciRevision hackageLatest)
+            -- TODO: remove conditional add add pantry key and size
+            mdisplayedVersion =
+                guard (hci /= hackageLatest) >> Just (VersionRev (hciVersion hci) (hciRevision hci))
+            (packageDepsLink, packageRevDepsLink) =
+                case mSnapName of
+                    Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
+                    Just snap ->
+                        let wrap f = SnapshotR snap $ f $ PNVNameVersion pname (hciVersion hci)
+                         in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
+        let mhomepage =
+                case T.strip (piHomepage) of
+                    x
+                        | null x -> Nothing
+                        | otherwise -> Just x
+            authors = enumerate (parseIdentitiesLiberally piAuthor)
+            maintainers =
+                let ms = enumerate (parseIdentitiesLiberally piMaintainer)
+                 in if ms == authors
+                        then []
+                        else ms
+        defaultLayout $ do
+            setTitle $ toHtml piName
+            $(combineScripts 'StaticR [js_highlight_js])
+            $(combineStylesheets 'StaticR [css_font_awesome_min_css, css_highlight_github_css])
+            let hoogleForm name =
+                    let exact = False
+                        mPackageName = Just pname
+                        queryText = "" :: Text
+                     in $(widgetFile "hoogle-form")
+            $(widgetFile "package")
+  where
+    unPackageRev (PackageVersionRev pname _) = pname
+    enumerate = zip [0 :: Int ..]
+    renderModules sname packageIdentifier = renderForest [] . moduleForest . coerce
+      where
+        renderForest _ [] = mempty
+        renderForest pathRev trees =
+            [hamlet|<ul .docs-list>
                         $forall tree <- trees
                           ^{renderTree tree}
               |]
-              where
-                renderTree (Node{..}) = [hamlet|
+          where
+            renderTree (Node {..}) =
+                [hamlet|
                   <li>
                     $if isModule
                       <a href=@{haddockUrl sname mli}>#{modName}
@@ -147,13 +167,12 @@ packagePage mSnapCabal pname = track "Handler.Package.packagePage" $ checkSpam p
                       #{modName}
                     ^{renderForest pathRev' subModules}
                 |]
-                  where
-                    mli = ModuleListingInfo modName packageIdentifier
-                    pathRev' = component:pathRev
-                    modName = moduleNameFromComponents (reverse pathRev')
-
-        maxDisplayedDeps :: Int
-        maxDisplayedDeps = 40
+              where
+                mli = ModuleListingInfo modName packageIdentifier
+                pathRev' = component : pathRev
+                modName = moduleNameFromComponents (reverse pathRev')
+    maxDisplayedDeps :: Int
+    maxDisplayedDeps = 40
 
 -- | An identifier specified in a package. Because this field has
 -- quite liberal requirements, we often encounter various forms. A
