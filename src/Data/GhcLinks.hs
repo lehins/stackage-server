@@ -36,7 +36,7 @@ readGhcLinks dir = do
             ]
       hashMap <- flip execStateT HashMap.empty
                $ forM_ opts $ \(arch, ver) -> do
-        let verText = ghcMajorVersionToText ver
+        let verText = textDisplay ver
             fileName = "ghc-" <> verText <> "-links.yaml"
             path = dir
               </> unpack (toPathPiece arch)

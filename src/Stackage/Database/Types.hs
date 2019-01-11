@@ -9,8 +9,7 @@ module Stackage.Database.Types
     , displayCompiler
     , parseCompiler
     , StackageCron(..)
-    , PantryHackageCabal(..)
-    , PantryTree(..)
+    , PantryCabal(..)
     , PantryPackage(..)
     , SnapshotFile(..)
     , HackageCabalInfo(..)
@@ -111,31 +110,15 @@ instance HasProcessContext StackageCron where
 instance HasPantryConfig StackageCron where
   pantryConfigL = lens scPantryConfig (\c f -> c {scPantryConfig = f})
 
-instance HasStorage StackageCron where
-  storageG = to (pcStorage . scPantryConfig)
-
-
-data PantryHackageCabal = PantryHackageCabal
-  { phcPackageName    :: !PackageNameP
-  , phcPackageVersion :: !VersionP
-  , phcSHA256         :: !SHA256
-  , phcFileSize       :: !FileSize
-  } deriving Show
-
-data PantryTree = PantryTree
-  { ptSHA256   :: !SHA256
-  , ptFileSize :: !FileSize
-  } deriving (Eq, Show)
-
-data PantryPackage =
-  PantryHackagePackage !PantryHackageCabal !PantryTree
-
 newtype Compiler =
     CompilerGHC { ghcVersion :: Version }
-    deriving (Eq)
+    deriving (Eq, Ord)
 
 instance Show Compiler where
   show = displayCompiler
+
+instance FromJSONKey Compiler where
+  fromJSONKey = FromJSONKeyTextParser (either fail pure . parseCompiler)
 
 displayCompiler :: (Monoid a, IsString a) => Compiler -> a
 displayCompiler (CompilerGHC vghc) = "ghc-" <> dtDisplay vghc
@@ -169,16 +152,33 @@ data SnapshotFile = SnapshotFile
     , sfCreatedOn :: !(Maybe Day) -- TODO: switch to UTCTime and get it from yaml
     }
 
+
+data PantryCabal = PantryCabal
+    { pcPackageName    :: !PackageNameP
+    , pcPackageVersion :: !VersionP
+    , pcCabalKey       :: !BlobKey
+    } deriving (Show)
+
+instance Display PantryCabal where
+    display PantryCabal {..} =
+        display (PackageIdentifierP pcPackageName pcPackageVersion) <> "@sha256:" <>
+        display pcCabalKey
+
+data PantryPackage = PantryPackage
+    { ppPantryCabal :: !PantryCabal
+    , ppPantryKey   :: !TreeKey
+    } deriving (Show)
+
 -- QUESTION: Potentially switch to `parsePackageIdentifierRevision`:
    -- PackageIdentifierRevision pn v (CFIHash sha (Just size)) <-
    --     either (fail . displayException) pure $ parsePackageIdentifierRevision txt
-   -- return (PantryHackageCabal pn v sha size)
+   -- return (PantryCabal pn v sha size)
 -- Issues with such switch:
 -- * CFILatest and CFIRevision do not make sense in stackage-snapshots
 -- * Implementation below is faster
-instance FromJSON PantryHackageCabal where
+instance FromJSON PantryCabal where
     parseJSON =
-        withText "PantryHackageCabal" $ \txt -> do
+        withText "PantryCabal" $ \txt -> do
             let (packageTxt, hashWithSize) = T.break (== '@') txt
                 (hashTxtWithAlgo, sizeWithComma) = T.break (== ',') hashWithSize
             -- Split package identifier foo-bar-0.1.2 into package name and version
@@ -188,32 +188,27 @@ instance FromJSON PantryHackageCabal where
                         | Just pkgName <- T.stripSuffix "-" pkgNameWithDashEnd ->
                             return (pkgName, pkgVersionTxt)
                     _ -> fail $ "Invalid package identifier format: " ++ T.unpack packageTxt
-            phcPackageName <- parseJSON $ String pkgNameTxt
-            phcPackageVersion <- parseJSON $ String pkgVersionTxt
+            pcPackageName <- parseJSON $ String pkgNameTxt
+            pcPackageVersion <- parseJSON $ String pkgVersionTxt
             hashTxt <-
                 maybe (fail $ "Unrecognized hashing algorithm: " ++ T.unpack hashTxtWithAlgo) pure $
                 T.stripPrefix "@sha256:" hashTxtWithAlgo
-            phcSHA256 <- either (fail . displayException) pure $ fromHexText hashTxt
-            (phcFileSize, "") <-
+            pcSHA256 <- either (fail . displayException) pure $ fromHexText hashTxt
+            (pcFileSize, "") <-
                 either fail (pure . first FileSize) =<<
                 maybe
                     (fail $ "Wrong size format:" ++ show sizeWithComma)
                     (pure . T.decimal)
                     (T.stripPrefix "," sizeWithComma)
-            return PantryHackageCabal {..}
+            let pcCabalKey = BlobKey pcSHA256 pcFileSize
+            return PantryCabal {..}
 
-
-instance FromJSON PantryTree where
-    parseJSON = withObject "PantryTree" $ \obj -> do
-      ptSHA256 <- obj .: "sha256"
-      ptFileSize <- obj .: "size"
-      return PantryTree {..}
-
+--toPackageIdentifierRevision :: PantryHackageCabal ->
 
 instance FromJSON PantryPackage where
     parseJSON =
         withObject "PantryPackage" $ \obj ->
-            PantryHackagePackage <$> obj .: "hackage" <*> obj .: "pantry-tree"
+            PantryPackage <$> obj .: "hackage" <*> obj .: "pantry-tree"
 
 
 instance FromJSON SnapshotFile where

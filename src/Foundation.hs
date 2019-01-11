@@ -162,9 +162,6 @@ instance RenderMessage App FormMessage where
 --
 -- https://github.com/yesodweb/yesod/wiki/Sending-email
 
-instance HasStorage App where
-    storageG = to appStackageDatabase
-
 instance GetStackageDatabase App Handler where
     getStackageDatabase = appStackageDatabase <$> getYesod
 instance GetStackageDatabase App (WidgetFor App) where

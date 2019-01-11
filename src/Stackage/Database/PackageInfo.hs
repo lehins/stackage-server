@@ -1,4 +1,4 @@
-{-# LANBUAGE NoImplicitPrelude #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Database.PackageInfo
     ( PackageInfo(..)
     , toPackageInfo
@@ -12,7 +12,6 @@ import           Data.Coerce
 import qualified Data.Text as T
 import           Distribution.Compiler (CompilerFlavor(GHC))
 import           Distribution.Package (Dependency(..), PackageIdentifier(..))
-import           Distribution.Package.ModuleForest
 import           Distribution.PackageDescription
                          (CondTree(..), Condition(..), ConfVar(..),
                           Flag(flagName, flagDefault), GenericPackageDescription,

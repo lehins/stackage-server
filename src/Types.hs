@@ -4,7 +4,6 @@
 module Types
     ( SnapshotBranch(..)
     , PackageNameP(..)
-    , unPackageName -- TODO: rename to packageNameText
     , VersionP(..)
     , Revision(..)
     , VersionRev(..)
@@ -18,7 +17,6 @@ module Types
     , StackageExecutable(..)
     , GhcMajorVersion(..)
     , GhcMajorVersionFailedParse(..)
-    , ghcMajorVersionToText
     , ghcMajorVersionFromText
     , dtDisplay
     , SupportedArch(..)
@@ -33,9 +31,6 @@ import Text.Blaze (ToMarkup(..))
 import Database.Persist.Sql (PersistFieldSql (sqlType))
 import Database.Persist
 import qualified Data.Text as T
-import qualified Data.Text.Lazy.Builder.Int as Builder
-import qualified Data.Text.Lazy.Builder as Builder
-import qualified Data.Text.Lazy as LText
 import qualified Data.Text.Read as Reader
 import Data.Char (ord)
 import Control.Monad.Catch (MonadThrow, throwM)
@@ -66,9 +61,6 @@ instance PathPiece SnapshotBranch where
         Right (x, "") <- Just $ Reader.decimal t1
         Just $ LtsMajorBranch x
 
-unPackageName :: PackageNameP -> Text
-unPackageName = utf8BuilderToText . display
-
 newtype PackageSetIdent = PackageSetIdent { unPackageSetIdent :: Text }
     deriving (Show, Read, Typeable, Eq, Ord, Hashable, PathPiece, ToMarkup, PersistField)
 instance PersistFieldSql PackageSetIdent where
@@ -84,31 +76,33 @@ data PackageIdentifierP =
                        !VersionP
     deriving (Eq, Ord, Show)
 
+instance Display PackageIdentifierP where
+  display (PackageIdentifierP pname ver) = display pname <> "-" <> display ver
 instance PathPiece PackageIdentifierP where
-    toPathPiece (PackageIdentifierP x y) = T.concat [toPathPiece x, "-", toPathPiece y]
+    toPathPiece = textDisplay
     fromPathPiece t = do
         let (tName', tVer) = T.breakOnEnd "-" t
         (tName, '-') <- T.unsnoc tName'
         guard $ not (T.null tName || T.null tVer)
         PackageIdentifierP <$> fromPathPiece tName <*> fromPathPiece tVer
 instance ToMarkup PackageIdentifierP where
-    toMarkup = toMarkup . toPathPiece
+    toMarkup = toMarkup . textDisplay
 
 instance Hashable PackageNameP where
-  hashWithSalt = hashUsing unPackageName
+    hashWithSalt = hashUsing textDisplay
 instance ToBuilder PackageNameP Builder where
     toBuilder = getUtf8Builder . display
 
 instance PathPiece PackageNameP where
     fromPathPiece = fmap PackageNameP . parsePackageName . T.unpack
-    toPathPiece (PackageNameP pn) = T.pack $ packageNameString pn
+    toPathPiece = textDisplay
 instance ToMarkup PackageNameP where
-    toMarkup (PackageNameP pn) = toMarkup $ packageNameString pn
+    toMarkup = toMarkup . packageNameString . unPackageNameP
 instance SqlString PackageNameP
 
 instance PathPiece VersionP where
     fromPathPiece = fmap VersionP . parseVersion . T.unpack
-    toPathPiece (VersionP v) = T.pack $ versionString v
+    toPathPiece v = textDisplay v
 instance ToMarkup VersionP where
     toMarkup (VersionP v) = toMarkup $ versionString v
 instance ToBuilder VersionP Builder where
@@ -175,11 +169,8 @@ data GhcMajorVersionFailedParse = GhcMajorVersionFailedParse Text
   deriving (Show, Typeable)
 instance Exception GhcMajorVersionFailedParse
 
-ghcMajorVersionToText :: GhcMajorVersion -> Text
-ghcMajorVersionToText (GhcMajorVersion a b)
-  = LText.toStrict
-  $ Builder.toLazyText
-  $ Builder.decimal a <> "." <> Builder.decimal b
+instance Display GhcMajorVersion where
+  display (GhcMajorVersion a b) = display a <> "." <> display b
 
 ghcMajorVersionFromText :: MonadThrow m => Text -> m GhcMajorVersion
 ghcMajorVersionFromText t = case Reader.decimal t of
@@ -191,10 +182,10 @@ ghcMajorVersionFromText t = case Reader.decimal t of
     failedParse = throwM $ GhcMajorVersionFailedParse t
 
 instance PersistFieldSql GhcMajorVersion where
-    sqlType = sqlType . liftM ghcMajorVersionToText
+    sqlType = sqlType . liftM textDisplay
 
 instance PersistField GhcMajorVersion where
-    toPersistValue = toPersistValue . ghcMajorVersionToText
+    toPersistValue = toPersistValue . textDisplay
     fromPersistValue v = do
         t <- fromPersistValueText v
         case ghcMajorVersionFromText t of
@@ -202,14 +193,14 @@ instance PersistField GhcMajorVersion where
             Nothing -> Left $ "Cannot convert to GhcMajorVersion: " <> t
 
 instance Hashable GhcMajorVersion where
-  hashWithSalt = hashUsing ghcMajorVersionToText
+  hashWithSalt = hashUsing textDisplay
 
 instance FromJSON GhcMajorVersion where
   parseJSON = withText "GhcMajorVersion" $
     either (fail . show) return . ghcMajorVersionFromText
 
 instance ToJSON GhcMajorVersion where
-  toJSON = toJSON . ghcMajorVersionToText
+  toJSON = toJSON . textDisplay
 
 
 data SupportedArch
@@ -260,8 +251,9 @@ newtype ModuleNameP = ModuleNameP {unModuleNameP :: ModuleName }
   deriving (Eq, Ord, Show, Read, Data, NFData, IsString)
 instance Display ModuleNameP where
   display = dtDisplay . unModuleNameP
+  textDisplay = dtDisplay . unModuleNameP
 instance PersistField ModuleNameP where
-  toPersistValue (ModuleNameP pn) = PersistText $ dtDisplay pn
+  toPersistValue = PersistText . textDisplay
   fromPersistValue v = ModuleNameP . fromString . T.unpack <$> fromPersistValue v
 instance PersistFieldSql ModuleNameP where
   sqlType _ = SqlString

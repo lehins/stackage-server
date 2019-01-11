@@ -37,7 +37,7 @@ instance ToJSON (WithSnapshotNames SnapshotDiff) where
                ]
 
 toDiffList :: SnapshotDiff -> [(PackageNameP, VersionChange)]
-toDiffList = sortOn (toCaseFold . unPackageName . fst) . HashMap.toList . unSnapshotDiff
+toDiffList = sortOn (toCaseFold . textDisplay . fst) . HashMap.toList . unSnapshotDiff
 
 versionPrefix :: VersionChange -> Maybe (Text, Text, Text)
 versionPrefix vc = case unVersionChange vc of
