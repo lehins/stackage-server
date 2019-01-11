@@ -15,25 +15,25 @@ import Stackage.Database.Types (ModuleListingInfo(..), PackageListingInfo(..), i
 import Stackage.Snapshot.Diff
 
 getStackageHomeR :: SnapName -> Handler TypedContent
-getStackageHomeR name = track "Handler.StackageHome.getStackageHomeR" $ do
-    Entity sid snapshot <- lookupSnapshot name >>= maybe notFound return
-    previousSnapName <- fromMaybe name . map snd <$> snapshotBefore (snapshotName snapshot)
-    let hoogleForm =
-            let queryText = "" :: Text
-                exact = False
-                mPackageName = Nothing :: Maybe Text
-            in $(widgetFile "hoogle-form")
-    packageCount <- getPackageCount sid
-    packages <- getPackages sid
-    selectRep $ do
-      provideRep $ do
-        defaultLayout $ do
-            setTitle $ toHtml $ snapshotTitle snapshot
-            $(widgetFile "stackage-home")
-      provideRep $ pure $ toJSON $ SnapshotInfo snapshot packages
-
-
-  where strip x = fromMaybe x (stripSuffix "." x)
+getStackageHomeR name =
+    track "Handler.StackageHome.getStackageHomeR" $ do
+        Entity sid snapshot <- lookupSnapshot name >>= maybe notFound return
+        previousSnapName <- fromMaybe name . map snd <$> snapshotBefore (snapshotName snapshot)
+        let hoogleForm =
+                let queryText = "" :: Text
+                    exact = False
+                    mPackageName = Nothing :: Maybe Text
+                 in $(widgetFile "hoogle-form")
+        packages <- getPackagesForSnapshot sid
+        let packageCount = length packages
+        selectRep $ do
+            provideRep $ do
+                defaultLayout $ do
+                    setTitle $ toHtml $ snapshotTitle snapshot
+                    $(widgetFile "stackage-home")
+            provideRep $ pure $ toJSON $ SnapshotInfo snapshot packages
+  where
+    strip x = fromMaybe x (stripSuffix "." x)
 
 data SnapshotInfo
   = SnapshotInfo { snapshot :: Snapshot
@@ -70,7 +70,7 @@ getStackageCabalConfigR name = track "Handler.StackageHome.getStackageCabalConfi
     mglobal <- lookupGetParam "global"
     let isGlobal = mglobal == Just "true"
 
-    plis <- getPackages sid
+    plis <- getPackagesForSnapshot sid
 
     respondSource typePlain $ yieldMany plis .|
         if isGlobal

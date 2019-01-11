@@ -115,8 +115,8 @@ getHackageDeprecations = do
         Right deprecated -> return deprecated
 
 
-stackageServerCron :: IO ()
-stackageServerCron = do
+stackageServerCron :: Bool -> IO ()
+stackageServerCron forceUpdate = do
     -- Hacky approach instead of PID files
     _ <- liftIO $ catchIO (bindPortTCP 17834 "127.0.0.1") $ \_ ->
         error $ "cabal loader process already running, exiting"
@@ -143,7 +143,7 @@ stackageServerCron = do
                                   , scStackageRoot = stackageRootDir
                                   , scProcessContext = defaultProcessContext
                                   , scLogFunc = logFunc
-                                  , sfForceFullUpdate = False }
+                                  , sfForceFullUpdate = forceUpdate }
       in runRIO stackage runStackageUpdate
 
 runStackageUpdate :: RIO StackageCron ()

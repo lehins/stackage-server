@@ -21,7 +21,7 @@ module Stackage.Database
     , snapshotPrettyName
     , snapshotPrettyNameShort
     , getAllPackages
-    , getPackages
+    , getPackagesForSnapshot
     , getPackageVersionBySnapshot
     , createStackageDatabase
     , openStackageDatabase
@@ -136,7 +136,11 @@ SnapshotPackage
 SnapshotHackagePackage
     snapshot SnapshotId
     cabal HackageCabalId
-    isHidden Bool default=False
+    isCore Bool
+    synopsis Text
+    readme Text
+    changelog Text
+    isHidden Bool
     UniqueSnapshotHackagePackage snapshot cabal
 Module
     name ModuleNameP
@@ -144,7 +148,7 @@ Module
 HackagePackageModule
     cabal HackageCabalId
     module ModuleId
-    hasDocs Bool default=False
+    hasDocs Bool
     UniqueSnapshotModule cabal module
 HackageDep
     user HackageCabalId
@@ -289,7 +293,8 @@ createOrUpdateSnapshot forceUpdate (snapName, updatedOn, parseSnapshotFile) = do
             Just (Entity key _snap) -> do
                 unless forceUpdate $
                     logWarn $
-                    "Snapshot with name: " <> display snapName <> " was updated, applying new patch."
+                    "Snapshot with name: " <> display snapName <>
+                    " was updated, applying new patch."
                 fmap (Just key, ) <$> parseSnapshotFile
             Nothing -> fmap (Nothing, ) <$> parseSnapshotFile
     -- Add new snapshot to the database, when necessary
@@ -328,7 +333,14 @@ createOrUpdateSnapshot forceUpdate (snapName, updatedOn, parseSnapshotFile) = do
                                 let isHidden = fromMaybe False $ Map.lookup packageName sfHidden
                                 _ <-
                                     insertBy $
-                                    SnapshotHackagePackage snapshotKey hackageCabalKey isHidden
+                                    SnapshotHackagePackage
+                                        snapshotKey
+                                        hackageCabalKey
+                                        False -- TODO: figure out core hints
+                                        (piSynopsis (toPackageInfo gpd))
+                                        "" -- TODO: readme
+                                        "" -- TODO: changelog
+                                        isHidden
                                 insertHackagePackageModules hackageCabalKey (getModuleNames gpd)
                                 insertHackageDeps hackageCabalKey (extractDependencies gpd)
                                 return True
@@ -564,26 +576,24 @@ getAllPackages = liftM (map toPair) $ run $ do
   where
     toPair (E.Value x, E.Value y, E.Value z) = (x, y, z)
 
-getPackages :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
-getPackages sid = liftM (map toPLI) $ run $ do
-    E.select $ E.from $ \(p,sp) -> do
-        E.where_ $
-            (p E.^. PackageId E.==. sp E.^. SnapshotPackagePackage) E.&&.
-            (sp E.^. SnapshotPackageSnapshot E.==. E.val sid)
-        E.orderBy [E.asc $ E.lower_ $ p E.^. PackageName]
-        return
-            ( p E.^. PackageName
-            , p E.^. PackageSynopsis
-            , sp E.^. SnapshotPackageVersion
-            , sp E.^. SnapshotPackageIsCore
-            )
+getPackagesForSnapshot :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
+getPackagesForSnapshot sid =
+    liftM (map toPLI) $
+    run $
+    rawSql
+        "SELECT package_name.name, version.version, \
+               \snapshot_hackage_package.is_core, snapshot_hackage_package.synopsis \
+        \FROM package_name, version, hackage_cabal, snapshot_hackage_package \
+        \WHERE snapshot_hackage_package.snapshot = ? \
+        \AND hackage_cabal.id = snapshot_hackage_package.cabal \
+        \AND hackage_cabal.name = package_name.id \
+        \AND hackage_cabal.version = version.id ORDER BY package_name.name ASC"
+        [toPersistValue sid]
   where
-    toPLI (E.Value name, E.Value synopsis, E.Value version, E.Value isCore) = PackageListingInfo
-        { pliName = name
-        , pliVersion = version
-        , pliSynopsis = synopsis
-        , pliIsCore = isCore
-        }
+    toPLI (Single name, Single version, Single isCore, Single synopsis) =
+        PackageListingInfo
+            {pliName = name, pliVersion = version, pliSynopsis = synopsis, pliIsCore = isCore}
+
 
 getPackageVersionBySnapshot
   :: GetStackageDatabase env m

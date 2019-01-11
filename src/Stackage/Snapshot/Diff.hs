@@ -17,7 +17,7 @@ import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as T (commonPrefixes)
 import           Data.These
 import           RIO
-import           Stackage.Database (SnapshotId, GetStackageDatabase, getPackages)
+import           Stackage.Database (SnapshotId, GetStackageDatabase, getPackagesForSnapshot)
 import           Stackage.Database.Types (SnapName, PackageListingInfo(..))
 import           Stackage.Types (dtDisplay)
 import           Types
@@ -72,7 +72,7 @@ changed :: VersionChange -> Bool
 changed = these (const True) (const True) (/=) . unVersionChange
 
 getSnapshotDiff :: GetStackageDatabase env m => SnapshotId -> SnapshotId -> m SnapshotDiff
-getSnapshotDiff a b = snapshotDiff <$> getPackages a <*> getPackages b
+getSnapshotDiff a b = snapshotDiff <$> getPackagesForSnapshot a <*> getPackagesForSnapshot b
 
 snapshotDiff :: [PackageListingInfo] -> [PackageListingInfo] -> SnapshotDiff
 snapshotDiff as bs =
