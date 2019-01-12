@@ -1,5 +1,6 @@
-{-# LANGUAGE CPP               #-}
-{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Stackage.Database.Cron
     ( stackageServerCron
     , newHoogleLocker
@@ -8,7 +9,9 @@ module Stackage.Database.Cron
 
 import qualified Codec.Archive.Tar             as Tar
 import           Conduit
-import           Control.Monad.Trans.AWS       (trying, _Error)
+--import           Control.Monad.Trans.AWS       (trying, _Error)
+--import           Control.Monad.Logger          (MonadLogger)
+import           Control.Lens                  ((.~))
 import           Control.SingleRun
 import qualified Data.ByteString.Lazy          as L
 import qualified Data.Conduit.Binary           as CB
@@ -17,18 +20,21 @@ import           Data.Conduit.Zlib             (WindowBits (WindowBits),
 import           Data.Streaming.Network        (bindPortTCP)
 import           Database.Persist              (Entity (Entity))
 import qualified Hoogle
-import           Network.AWS                   (Credentials (Discover),
-                                                chunkedFile, defaultChunkSize,
-                                                envManager, newEnv, runAWS,
-                                                send)
+import           Network.AWS                   hiding (Request, Response)
 import           Network.AWS.Data.Body         (toBody)
-import           Network.AWS.S3                (BucketName (BucketName),
-                                                ObjectCannedACL (OPublicRead),
-                                                ObjectKey (ObjectKey), poACL,
-                                                poContentType, putObject)
+import           Network.AWS.Data.Log          (build)
+import           Network.AWS.Data.Text         (toText)
+import           Network.AWS.Pager
+import           Network.AWS.S3
 import           Network.HTTP.Client
 import           Network.HTTP.Client.Conduit   (bodyReaderSource)
+import           Network.HTTP.Simple           (getResponseBody, httpJSONEither,
+                                                parseRequest)
 import           Network.HTTP.Types            (status200)
+import           Pantry                        (defaultHackageSecurityConfig)
+import           Pantry.Types                  (HpackExecutable (HpackBundled),
+                                                PantryConfig (..))
+import           Path                          (parseAbsDir, toFilePath)
 import           RIO
 import           RIO.Directory
 import           RIO.FilePath
@@ -36,15 +42,13 @@ import qualified RIO.Map                       as Map
 import           RIO.Process                   (mkDefaultProcessContext)
 import qualified RIO.Text                      as T
 import           Stackage.Database
-import           Stackage.Database.Types       (StackageCron (..), Deprecation(..))
-import           Stackage.PackageIndex.Conduit
-import           Web.PathPieces                (toPathPiece)
-import           Pantry                        (defaultHackageSecurityConfig)
-import           Pantry.Types                  (HpackExecutable (HpackBundled),
-                                                PantryConfig (..))
-import           Path                          (parseAbsDir, toFilePath)
+import           Stackage.Database.Types       (Deprecation (..),
+                                                StackageCron (..),
+                                                haddockBucketName)
 import           System.Environment            (getEnv)
-import           Network.HTTP.Simple (parseRequest, httpJSONEither, getResponseBody)
+import           Types                         (ModuleNameP(..), PackageIdentifierP)
+--import           UnliftIO.Concurrent           (getNumCapabilities)
+import           Web.PathPieces                (fromPathPiece, toPathPiece)
 
 hoogleKey :: SnapName -> Text
 hoogleKey name = T.concat
@@ -129,6 +133,7 @@ stackageServerCron forceUpdate = do
     cabalImmutable <- newIORef Map.empty
     cabalMutable <- newIORef Map.empty
     defaultProcessContext <- mkDefaultProcessContext
+    aws <- newEnv Discover
     withLogFunc (setLogMinLevel LevelInfo lo) $ \ logFunc ->
       let pantryConfig = PantryConfig { pcHackageSecurity = defaultHackageSecurityConfig
                                       , pcHpackExecutable = HpackBundled
@@ -137,22 +142,80 @@ stackageServerCron forceUpdate = do
                                       , pcUpdateRef = updateRef
                                       , pcParsedCabalFilesImmutable = cabalImmutable
                                       , pcParsedCabalFilesMutable = cabalMutable
-                                      , pcConnectionCount = 1
+                                      , pcConnectionCount = 2
                                       }
           stackage = StackageCron { scPantryConfig = pantryConfig
                                   , scStackageRoot = stackageRootDir
                                   , scProcessContext = defaultProcessContext
                                   , scLogFunc = logFunc
-                                  , sfForceFullUpdate = forceUpdate }
+                                  , sfForceFullUpdate = forceUpdate
+                                  , sfEnvAWS = aws
+                                  }
       in runRIO stackage runStackageUpdate
+
+
+
+-- | Send request to AWS and process the response with a handler. A separate
+-- error handler will be invoked whenever an error occurs, which suppose to return
+-- some sort of default value. Error is logged using `MonadLoggger`
+sendAWS
+  :: (MonadReader env m,
+      MonadResource m,
+      HasLogFunc env, HasEnv env, AWSRequest a) =>
+     a -> (Error -> m b) -> (Rs a -> m b) -> m b
+sendAWS req onErr onResp = do
+  env <- ask
+  eResp <- runAWS env $ trying _Error $ send req
+  case eResp of
+    Left err -> do
+      logError $ Utf8Builder (build err)
+      onErr err
+    Right resp -> onResp resp
+
+
+-- | Recursively handle responses that support pagination returned by `sendAWS`.
+pagerAWS
+  :: (AWSPager a, HasEnv env, HasLogFunc env, MonadReader env m, MonadResource m)
+  => a -> (Rs a -> m ()) -> m ()
+pagerAWS req onResp = do
+  sendAWS req (const $ return ()) $ \resp -> do
+    onResp resp
+    case page req resp of
+      Just newReq -> pagerAWS newReq onResp
+      _           -> return ()
+
+-- | Conduit style `pagerAWS`, produces elements from each page continuously
+-- until there is no more pages avialable.
+sourcePagerAWS
+  :: (AWSPager a, HasLogFunc env, HasEnv env, MonadReader env m, MonadResource m)
+  => a -> (Rs a -> [b]) -> ConduitT v b m ()
+sourcePagerAWS req getPage = pagerAWS req (yieldMany . getPage)
+
+pathToPackageModule :: Text -> Maybe Text
+pathToPackageModule txt =
+    case T.split (== '/') txt of
+        [pkgIdentifier, moduleNameDashes] -> do
+             modName :: ModuleNameP <- fromPathPiece moduleNameDashes
+             pkgId :: PackageIdentifierP <- fromPathPiece pkgIdentifier
+             return $ textDisplay $ display pkgId <> ": " <> display modName <> "\n"
+        _ -> Nothing
 
 runStackageUpdate :: RIO StackageCron ()
 runStackageUpdate = do
-    createStackageDatabase getHackageDeprecations
-
+    let prefix = "lts-13.2/"
+    let req = listObjectsV2 (BucketName haddockBucketName) & lovPrefix .~ Just prefix
+    dir <- getCurrentDirectory
+    --createStackageDatabase getHackageDeprecations
+    runConduitRes $
+        sourcePagerAWS req (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
+        concatMapC (T.stripSuffix ".html") .|
+        concatMapC (T.stripPrefix prefix) .|
+        concatMapC pathToPackageModule .|
+        mapC encodeUtf8 .|
+        sinkFile (dir </> "lts-13.2.txt")
+    return ()
 
 -- #if !DEVELOPMENT
---     env <- newEnv Discover
 
 --     let upload :: FilePath -> ObjectKey -> IO ()
 --         upload fp key = do

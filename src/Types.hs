@@ -9,6 +9,7 @@ module Types
     , VersionRev(..)
     , PackageVersionRev(..)
     , ModuleNameP(..)
+    , moduleNameFromComponents
     , PackageIdentifierP(..)
     , PackageNameVersion(..)
     , HoogleVersion(..)
@@ -40,7 +41,8 @@ import Data.Hashable
 import Database.Esqueleto.Internal.Language
 import ClassyPrelude.Yesod (ToBuilder(..))
 import Distribution.ModuleName (ModuleName(..))
-import qualified Distribution.Text as DT (Text, display)
+import qualified Distribution.Text as DT (Text, display, simpleParse)
+import qualified Distribution.ModuleName as DT (validModuleComponent, fromComponents, components)
 
 dtDisplay :: (DT.Text a, IsString b) => a -> b
 dtDisplay = fromString . DT.display
@@ -232,8 +234,9 @@ instance PathPiece SupportedArch where
     fromPathPiece _ = Nothing
 
 type Year = Int
-newtype Month = Month Int
-  deriving (Eq, Read, Show, Ord)
+newtype Month =
+    Month Int
+    deriving (Eq, Read, Show, Ord)
 instance PathPiece Month where
     toPathPiece (Month i)
         | i < 10 = T.pack $ '0' : show i
@@ -247,15 +250,36 @@ instance PathPiece Month where
 
 
 
-newtype ModuleNameP = ModuleNameP {unModuleNameP :: ModuleName }
-  deriving (Eq, Ord, Show, Read, Data, NFData, IsString)
+newtype ModuleNameP = ModuleNameP
+    { unModuleNameP :: ModuleName
+    } deriving (Eq, Ord, Show, Read, Data, NFData, IsString)
 instance Display ModuleNameP where
-  display = dtDisplay . unModuleNameP
-  textDisplay = dtDisplay . unModuleNameP
+    display = dtDisplay . unModuleNameP
+    textDisplay = dtDisplay . unModuleNameP
 instance PersistField ModuleNameP where
-  toPersistValue = PersistText . textDisplay
-  fromPersistValue v = ModuleNameP . fromString . T.unpack <$> fromPersistValue v
+    toPersistValue = PersistText . textDisplay
+    fromPersistValue v = fromPersistValue v >>= parseModuleNameP
+
+parseModuleNameP :: Text -> Either Text ModuleNameP
+parseModuleNameP txt =
+    case DT.simpleParse $ T.unpack txt of
+        Nothing -> Left $ "Was unable to parse ModuleName: " <> txt
+        Just moduleName -> Right $ ModuleNameP moduleName
+
+-- | Construct a module name from valid components
+moduleNameFromComponents :: [Text] -> ModuleNameP
+moduleNameFromComponents = ModuleNameP . DT.fromComponents . map T.unpack
+
 instance PersistFieldSql ModuleNameP where
-  sqlType _ = SqlString
+    sqlType _ = SqlString
 instance ToMarkup ModuleNameP where
-  toMarkup = dtDisplay . unModuleNameP
+    toMarkup = dtDisplay . unModuleNameP
+instance PathPiece ModuleNameP where
+    toPathPiece (ModuleNameP moduleName) =
+      T.intercalate "-" $ map T.pack $ DT.components moduleName
+    fromPathPiece moduleNameDashes = do
+      (moduleNameDashesNoDot, "") <- Just $ T.break (== '.') moduleNameDashes
+      -- \ make sure there are no dots in the module components
+      let moduleComponents = T.unpack <$> T.split (== '-') moduleNameDashesNoDot
+      guard (all DT.validModuleComponent moduleComponents)
+      pure $ ModuleNameP $ DT.fromComponents moduleComponents

@@ -83,13 +83,15 @@ import Pantry.Types
     , HasPantryConfig(..)
     , PackageNameP(..)
     , Revision(..)
+    , PackageIdentifierRevision(..)
+    , CabalFileInfo(..)
     , BlobKey(..)
     , Storage(Storage)
     , VersionP(..)
     )
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
-import Pantry.Hackage (forceUpdateHackageIndex, DidUpdateOccur(..))
+import Pantry.Hackage (DidUpdateOccur(..), forceUpdateHackageIndex, getHackageTarballOnGPD)
 import Control.Monad.Trans.Class (lift)
 import Types
 import Distribution.Types.VersionRange (VersionRange)
@@ -274,12 +276,11 @@ createOrUpdateSnapshot ::
        Bool
     -> Map Compiler [(HackageCabalId, RIO StackageCron PackageInfo)]
     -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
-    -> ReaderT SqlBackend (RIO StackageCron) ()
+    -> RIO StackageCron ()
 createOrUpdateSnapshot forceUpdate corePackages (snapName, updatedOn, parseSnapshotFile) = do
-    mSnap <- getBy (UniqueSnapshot snapName)
+    mSnap <- withStorage $ getBy (UniqueSnapshot snapName)
     -- Decide if creation or an update is necessary:
     mKeySnapFile <-
-        lift $
         case mSnap of
             Just (Entity _key snap)
                 | snapshotUpdatedOn snap == Just updatedOn && not forceUpdate -> do
@@ -302,6 +303,7 @@ createOrUpdateSnapshot forceUpdate corePackages (snapName, updatedOn, parseSnaps
             Nothing -> fmap (Nothing, ) <$> parseSnapshotFile
     -- Add new snapshot to the database, when necessary
     mKeySnapFileAdded <-
+        withStorage $
         case mKeySnapFile of
             Just (Just snapKey, sf) -> return $ Just (snapKey, sf)
             Just (Nothing, sf@SnapshotFile {sfName, sfCompiler, sfCreatedOn})
@@ -309,49 +311,74 @@ createOrUpdateSnapshot forceUpdate corePackages (snapName, updatedOn, parseSnaps
                     fmap (, sf) <$> insertUnique (Snapshot sfName sfCompiler createdOn Nothing)
             _ -> return Nothing
     forM_ mKeySnapFileAdded $ \(snapKey, SnapshotFile {sfName, sfCompiler, sfHidden, sfPackages}) -> do
-        case sfName of
-            SNLts major minor -> void $ insertUnique $ Lts snapKey major minor
-            SNNightly day -> void $ insertUnique $ Nightly snapKey day
+        withStorage $
+            case sfName of
+                SNLts major minor -> void $ insertUnique $ Lts snapKey major minor
+                SNNightly day -> void $ insertUnique $ Nightly snapKey day
         case Map.lookup sfCompiler corePackages of
-            Nothing ->
-                lift $ logError $ "Hints are not found for the compiler: " <> display sfCompiler
+            Nothing -> logError $ "Hints are not found for the compiler: " <> display sfCompiler
             Just compilerCorePackages ->
                 forM_ compilerCorePackages $ \(hackageCabalKey, getPI) -> do
-                    piCore <- lift getPI
-                    addSnapshotHackagePackage True snapKey hackageCabalKey False piCore
-        pantryUpdatesSucceeded <-
-            forM sfPackages $ \(PantryPackage pc treeKey) -> do
-                getPantryHackageCabal pc >>= \case
-                    Nothing -> do
-                        lift $
-                            logError $
-                            "Couldn't find a valid hackage cabal file " <>
-                            "in pantry corresponding to: " <>
-                            display pc
-                        return False
-                    Just (hackageCabalKey, cabalBlob)
-                        -- _pkg <- lift $ getHackageTarball (toPackageIdentifierRevision pc) (Just treeKey)
-                     -> do
-                        lift (parseCabalBlobMaybe (pcPackageName pc) cabalBlob) >>= \case
-                            Nothing -> pure False
-                            Just gpd -> do
-                                addSnapshotHackagePackage
-                                    False
-                                    snapKey
-                                    hackageCabalKey
-                                    (fromMaybe False (Map.lookup (pcPackageName pc) sfHidden))
-                                    (toPackageInfo gpd)
-                                insertHackagePackageModules hackageCabalKey (getModuleNames gpd)
-                                insertHackageDeps hackageCabalKey (extractDependencies gpd)
-                                pure True
+                    piCore <- getPI
+                    withStorage $
+                        addSnapshotHackagePackage True snapKey hackageCabalKey False piCore
+        let totalPackages = length sfPackages
+            addPantryPackageWithReport (prevSucc, countPackages) pp = do
+                let PantryCabal {pcPackageName, pcPackageVersion} = ppPantryCabal pp
+                    isHidden = fromMaybe False (Map.lookup pcPackageName sfHidden)
+                logSticky $
+                    "Loading " <> display sfName <> "(" <> displayShow countPackages <> "/" <>
+                    displayShow totalPackages <>
+                    "): " <> display (PackageIdentifierP pcPackageName pcPackageVersion)
+                curSucc <- addPantryPackage forceUpdate snapKey isHidden pp
+                pure (curSucc && prevSucc, countPackages + 1)
+        pantryUpdateSucceeded <-
+            fst <$> foldM addPantryPackageWithReport (True, 0 :: Int) sfPackages
         docUpdateSucceeded <- checkForDocs sfName
-        if and pantryUpdatesSucceeded && docUpdateSucceeded
+        if pantryUpdateSucceeded && docUpdateSucceeded
             then do
-                update snapKey [SnapshotUpdatedOn =. Just updatedOn]
-                lift $
-                    logInfo $ "Created or updated snapshot '" <> display sfName <> "' successfully"
-            else lift $
-                 logError $ "There were errors while adding snapshot '" <> display sfName <> "'"
+                withStorage $ update snapKey [SnapshotUpdatedOn =. Just updatedOn]
+                logInfo $ "Created or updated snapshot '" <> display sfName <> "' successfully"
+            else logError $ "There were errors while adding snapshot '" <> display sfName <> "'"
+
+addPantryPackage :: Bool -> SnapshotId -> Bool -> PantryPackage -> RIO StackageCron Bool
+addPantryPackage _forceUpdate snapKey isHidden (PantryPackage pc treeKey) =
+    withStorage (getPantryHackageCabal pc) >>= \case
+        Nothing -> do
+            logError $
+                "Couldn't find a valid hackage cabal file " <> "in pantry corresponding to: " <>
+                display pc
+            return False
+        Just (hackageCabalKey, cabalBlobId) -> do
+            didUpdateRef <- newIORef False
+            let pnameVer = PackageIdentifierP (pcPackageName pc) (pcPackageVersion pc)
+                onGPD gpd = do
+                    addSnapshotHackagePackage
+                        False
+                        snapKey
+                        hackageCabalKey
+                        isHidden
+                        (toPackageInfo gpd)
+                    insertHackagePackageModules hackageCabalKey (getModuleNames gpd)
+                    insertHackageDeps pnameVer hackageCabalKey (extractDependencies gpd)
+                    writeIORef didUpdateRef True
+            _ <-
+                getHackageTarballOnGPD
+                    (withStorage . onGPD)
+                    (toPackageIdentifierRevision pc)
+                    (Just treeKey)
+            unlessM (readIORef didUpdateRef) $
+                withStorage $ do
+                    isNotLoaded <-
+                            isNothing <$>
+                            getBy (UniqueSnapshotHackagePackage snapKey hackageCabalKey)
+                    -- whenM ((||) <$> pure forceUpdate <*> isNotLoaded) $ do
+                    when isNotLoaded $ do
+                        gpd <- parseCabalBlob <$> loadBlobById cabalBlobId
+                        onGPD gpd
+            return True
+
+
 
 addSnapshotHackagePackage ::
        MonadIO m
@@ -378,11 +405,17 @@ getCorePackages = do
         Right (hints :: Map Compiler (Map PackageNameP VersionP)) ->
             traverse (fmap Map.elems . Map.traverseMaybeWithKey getCabalId) hints
         Left exc -> do
-            logError $ "Error parsing 'global-hints.yaml' file: " <> fromString (displayException exc)
+            logError $
+                "Error parsing 'global-hints.yaml' file: " <> fromString (displayException exc)
             return mempty
   where
     getCabalId pname ver = do
         let pid = PackageIdentifierP pname ver
+            pir =
+                PackageIdentifierRevision
+                    (unPackageNameP pname)
+                    (unVersionP ver)
+                    (CFIRevision (Revision 0))
         withStorage (getHackageCabal pname ver Nothing) >>= \case
             Nothing -> do
                 logError $
@@ -391,18 +424,25 @@ getCorePackages = do
                 return Nothing
             Just (hcid, bid) -> do
                 mpiRef <- newIORef Nothing
+                let onGPD gpd =
+                        withStorage $ do
+                            insertHackagePackageModules hcid (getModuleNames gpd)
+                            insertHackageDeps pid hcid (extractDependencies gpd)
+                            let packageInfo = toPackageInfo gpd
+                            writeIORef mpiRef $ Just packageInfo
                 let getMemoPackageInfo =
                         readIORef mpiRef >>= \case
                             Just packageInfo -> return packageInfo
                             Nothing -> do
-                                logInfo $ "Loading core package: " <> display pid
-                                withStorage $ do
-                                    gpd <- parseCabalBlob <$> loadBlobById bid
-                                    insertHackagePackageModules hcid (getModuleNames gpd)
-                                    insertHackageDeps hcid (extractDependencies gpd)
-                                    let packageInfo = toPackageInfo gpd
-                                    writeIORef mpiRef $ Just packageInfo
-                                    return packageInfo
+                                logSticky $ "Loading core package: " <> display pid
+                                _ <- getHackageTarballOnGPD onGPD pir Nothing
+                                readIORef mpiRef >>= \case
+                                    Nothing -> do
+                                        gpd <- parseCabalBlob <$> withStorage (loadBlobById bid)
+                                        let packageInfo = toPackageInfo gpd
+                                        writeIORef mpiRef $ Just packageInfo
+                                        pure packageInfo
+                                    Just packageInfo -> pure packageInfo
                 return $ Just (hcid, getMemoPackageInfo)
 
 -- | Download a list of available .html files from S3 bucket for a particular resolver and record
@@ -469,7 +509,7 @@ createStackageDatabase getDeprecations = do
     corePackages <- getCorePackages
     runConduitRes $
         sourceSnapshots .|
-        mapM_C (lift . withStorage . createOrUpdateSnapshot forceFullUpdate corePackages)
+        mapM_C (lift . createOrUpdateSnapshot forceFullUpdate corePackages)
     withStorage $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
 
 insertHackagePackageModules ::
@@ -481,16 +521,20 @@ insertHackagePackageModules hackageCabalKey = mapM_ $ \ moduleName -> do
 
 insertHackageDeps ::
        (MonadIO m, MonadReader env m, HasLogFunc env)
-    => HackageCabalId
+    => PackageIdentifierP
+    -> HackageCabalId
     -> Map PackageNameP VersionRange
     -> ReaderT SqlBackend m ()
-insertHackageDeps hackageCabalKey dependencies =
+insertHackageDeps pid hackageCabalKey dependencies =
     forM_ (Map.toList dependencies) $ \(dep, range) ->
         getBy (UniquePackageName dep) >>= \case
             Just pname -> do
                 void $ insertBy (HackageDep hackageCabalKey (entityKey pname) (dtDisplay range))
-            Nothing -> do
-                lift $ logWarn $ "Couldn't find a dependency in Pantry with name: " <> display dep
+            Nothing ->
+                lift $
+                logWarn $
+                "Couldn't find a dependency of " <> display pid <> " in Pantry with name: " <>
+                display dep
 
 
 getPackageNameId :: MonadIO m => PackageNameP -> ReaderT SqlBackend m (Maybe PackageNameId)
@@ -721,11 +765,11 @@ lookupSnapshotPackage sid pname = run $ do
 getPantryHackageCabal
   :: MonadIO m
   => PantryCabal
-  -> ReaderT SqlBackend m (Maybe (HackageCabalId, ByteString))
+  -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId))
 getPantryHackageCabal (PantryCabal {..}) =
-    fmap (\(Single cid, Single contents) -> (cid, contents)) . listToMaybe <$>
+    fmap (\(Single cid, Single bid) -> (cid, bid)) . listToMaybe <$>
     rawSql
-        "SELECT hackage_cabal.id, blob.contents \
+        "SELECT hackage_cabal.id, hackage_cabal.cabal \
          \FROM hackage_cabal, blob, package_name, version \
          \WHERE hackage_cabal.name=package_name.id \
          \AND hackage_cabal.version=version.id \

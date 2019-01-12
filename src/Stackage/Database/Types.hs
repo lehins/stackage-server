@@ -10,6 +10,7 @@ module Stackage.Database.Types
     , parseCompiler
     , StackageCron(..)
     , PantryCabal(..)
+    , toPackageIdentifierRevision
     , PantryPackage(..)
     , SnapshotFile(..)
     , HackageCabalInfo(..)
@@ -17,6 +18,7 @@ module Stackage.Database.Types
     , ModuleListingInfo(..)
     , LatestInfo(..)
     , Deprecation(..)
+    , haddockBucketName
     ) where
 
 import           Data.Aeson
@@ -26,6 +28,7 @@ import           Data.Text.Read       (decimal)
 import qualified Data.Text.Read       as T (decimal)
 import           Database.Persist
 import           Database.Persist.Sql hiding (LogFunc)
+import           Network.AWS          (HasEnv(..), Env)
 import           Pantry.SHA256
 import           Pantry.Storage       (BlobId, HackageCabalId)
 import           Pantry.Types
@@ -36,6 +39,9 @@ import           Stackage.Types       (dtDisplay)
 import           Text.Blaze           (ToMarkup (..))
 import           Types
 import           Web.PathPieces
+
+haddockBucketName :: Text
+haddockBucketName = "haddock.stackage.org"
 
 data SnapName = SNLts !Int !Int
               | SNNightly !Day
@@ -69,17 +75,17 @@ instance PathPiece SnapName where
     fromPathPiece = parseSnapName
 
 instance FromJSON SnapName where
-  parseJSON = withText "SnapName" (maybe (fail "Can't parse snapshot name") pure . parseSnapName)
+    parseJSON = withText "SnapName" (maybe (fail "Can't parse snapshot name") pure . parseSnapName)
 
 showSnapName :: SnapName -> Text
 showSnapName (SNLts x y) = T.concat ["lts-", T.pack (show x), ".", T.pack (show y)]
 showSnapName (SNNightly d) = "nightly-" <> T.pack (show d)
 
 instance ToMarkup SnapName where
-  toMarkup = toMarkup . showSnapName
+    toMarkup = toMarkup . showSnapName
 
 instance Display SnapName where
-  display = display . showSnapName
+    display = display . showSnapName
 
 parseSnapName :: Text -> Maybe SnapName
 parseSnapName t0 = nightly <|> lts
@@ -99,26 +105,30 @@ data StackageCron = StackageCron
     , scLogFunc         :: !LogFunc
     , scProcessContext  :: !ProcessContext
     , sfForceFullUpdate :: !Bool
+    , sfEnvAWS          :: !Env
     }
 
+instance HasEnv StackageCron where
+    environment = lens sfEnvAWS (\c f -> c {sfEnvAWS = f})
+
 instance HasLogFunc StackageCron where
-  logFuncL = lens scLogFunc (\c f -> c {scLogFunc = f})
+    logFuncL = lens scLogFunc (\c f -> c {scLogFunc = f})
 
 instance HasProcessContext StackageCron where
-  processContextL = lens scProcessContext (\c f -> c {scProcessContext = f})
+    processContextL = lens scProcessContext (\c f -> c {scProcessContext = f})
 
 instance HasPantryConfig StackageCron where
-  pantryConfigL = lens scPantryConfig (\c f -> c {scPantryConfig = f})
+    pantryConfigL = lens scPantryConfig (\c f -> c {scPantryConfig = f})
 
 newtype Compiler =
     CompilerGHC { ghcVersion :: Version }
     deriving (Eq, Ord)
 
 instance Show Compiler where
-  show = displayCompiler
+    show = displayCompiler
 
 instance FromJSONKey Compiler where
-  fromJSONKey = FromJSONKeyTextParser (either fail pure . parseCompiler)
+    fromJSONKey = FromJSONKeyTextParser (either fail pure . parseCompiler)
 
 displayCompiler :: (Monoid a, IsString a) => Compiler -> a
 displayCompiler (CompilerGHC vghc) = "ghc-" <> dtDisplay vghc
@@ -169,6 +179,15 @@ data PantryPackage = PantryPackage
     , ppPantryKey   :: !TreeKey
     } deriving (Show)
 
+toPackageIdentifierRevision :: PantryCabal -> PackageIdentifierRevision
+toPackageIdentifierRevision PantryCabal {..} =
+    PackageIdentifierRevision
+        (unPackageNameP pcPackageName)
+        (unVersionP pcPackageVersion)
+        (CFIHash sha (Just size))
+  where
+    BlobKey sha size = pcCabalKey
+
 -- QUESTION: Potentially switch to `parsePackageIdentifierRevision`:
    -- PackageIdentifierRevision pn v (CFIHash sha (Just size)) <-
    --     either (fail . displayException) pure $ parsePackageIdentifierRevision txt
@@ -203,7 +222,6 @@ instance FromJSON PantryCabal where
             let pcCabalKey = BlobKey pcSHA256 pcFileSize
             return PantryCabal {..}
 
---toPackageIdentifierRevision :: PantryHackageCabal ->
 
 instance FromJSON PantryPackage where
     parseJSON =

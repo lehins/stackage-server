@@ -7,11 +7,13 @@ module Handler.Haddock
 import Import
 import qualified Data.Text as T (takeEnd)
 import Stackage.Database
-import Stackage.Database.Types (HackageCabalInfo(..))
+import Stackage.Database.Types (HackageCabalInfo(..), haddockBucketName)
 
 makeURL :: SnapName -> [Text] -> Text
 makeURL snapName rest = concat
-    $ "https://s3.amazonaws.com/haddock.stackage.org/"
+    $ "https://s3.amazonaws.com/"
+    : haddockBucketName
+    : "/"
     : toPathPiece snapName
     : map (cons '/') rest
 

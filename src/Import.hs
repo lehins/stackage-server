@@ -19,7 +19,6 @@ import Stackage.Database (SnapName)
 import Stackage.Database.Types (ModuleListingInfo(..))
 import Formatting (format)
 import Formatting.Time (diff)
-import Distribution.ModuleName (fromComponents, components)
 
 parseLtsPair :: Text -> Maybe (Int, Int)
 parseLtsPair t1 = do
@@ -37,14 +36,7 @@ haddockUrl :: SnapName -> ModuleListingInfo -> Route App
 haddockUrl sname mli =
     HaddockR
         sname
-        [toPathPiece (mliPackageIdentifier mli), moduleHaddockFileName (mliModuleName mli)]
-
-moduleHaddockFileName :: ModuleNameP -> Text
-moduleHaddockFileName (ModuleNameP moduleName) =
-    intercalate "-" (pack <$> components moduleName) <> ".html"
-
-moduleNameFromComponents :: [Text] -> ModuleNameP
-moduleNameFromComponents = ModuleNameP . fromComponents . map unpack
+        [toPathPiece (mliPackageIdentifier mli), toPathPiece (mliModuleName mli) <> ".html"]
 
 track
     :: MonadIO m
