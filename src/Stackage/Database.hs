@@ -35,11 +35,9 @@ module Stackage.Database
     , getPantryHackageCabal
     , getAllPackages
     , getPackagesForSnapshot
-    , getPackageVersionBySnapshot
+    , getPackageVersionForSnapshot
     , getSnapshotModules
     , getPackageModules
-    , SnapshotPackage (..)
-    , lookupSnapshotPackage
     , SnapshotHackagePackage(..)
     -- * Deprecations
     , addDeprecated
@@ -52,8 +50,6 @@ module Stackage.Database
     , getReverseDeps
     , getDepsCount
     , getPackageInfo
-    , Package (..)
-    , getPackage
     , getSnapshotsForPackage
     , getSnapshots
     , countSnapshots
@@ -61,7 +57,6 @@ module Stackage.Database
     , last5Lts5Nightly
     , lastXLts5Nightly
     , snapshotsJSON
-    , getPackageCount
     , getLatestLtsByGhc
     ) where
 
@@ -115,23 +110,6 @@ Nightly
     snap SnapshotId
     day Day
     UniqueNightly day
-Package
-    name PackageNameP
-    latest VersionP
-    synopsis Text
-    homepage Text
-    author Text
-    maintainer Text
-    licenseName Text
-    description Html
-    changelog Html
-    UniquePackage name
-SnapshotPackage
-    snapshot SnapshotId
-    package PackageId
-    isCore Bool
-    version VersionP
-    UniqueSnapshotPackage snapshot package
 SnapshotHackagePackage
     snapshot SnapshotId
     cabal HackageCabalId
@@ -139,7 +117,7 @@ SnapshotHackagePackage
     synopsis Text
     readme Text
     changelog Text
-    isHidden Bool
+    isHidden Bool -- used for pantry, but is not relevant for stackage
     UniqueSnapshotHackagePackage snapshot cabal
 Module
     name ModuleNameP
@@ -154,11 +132,6 @@ HackageDep
     uses PackageNameId
     range Text
     UniqueHackageDep user uses
-Dep
-    user PackageId
-    uses PackageNameP -- avoid circular dependency issue when loading database
-    range Text
-    UniqueDep user uses
 Deprecated
     package PackageNameId
     inFavourOf [PackageNameId]
@@ -188,15 +161,12 @@ instance HasPantryConfig env => GetStackageDatabase env (RIO env) where
 
 
 _hideUnusedWarnings
-    :: ( SnapshotPackageId
-       , SnapshotHackagePackageId
+    :: ( SnapshotHackagePackageId
        , SchemaId
        , LtsId
        , NightlyId
        , ModuleId
        , SnapshotPackageModuleId
-       , PackageId
-       , DepId
        , HackageDepId
        , DeprecatedId
        ) -> ()
@@ -402,21 +372,24 @@ snapshotPrettyNameShort name =
         SNLts x y -> T.concat ["LTS Haskell ", T.pack (show x), ".", T.pack (show y)]
         SNNightly d -> "Stackage Nightly " <> T.pack (show d)
 
-getAllPackages :: GetStackageDatabase env m => m [(PackageNameP, VersionP, Text)] -- FIXME add information on whether included in LTS and Nightly
-getAllPackages = liftM (map toPair) $ run $ do
-    E.select $ E.from $ \p -> do
-        E.orderBy [E.asc $ E.lower_ $ p E.^. PackageName]
-        return
-            ( p E.^. PackageName
-            , p E.^. PackageLatest
-            , p E.^. PackageSynopsis
-            )
-  where
-    toPair (E.Value x, E.Value y, E.Value z) = (x, y, z)
+-- FIXME: list latest version with latest snapshot it is in
+getAllPackages :: GetStackageDatabase env m => m [(PackageNameP, VersionP, Text)]
+getAllPackages =
+    liftM (map (\(Single name, Single ver, Single synopsis) -> (name, ver, synopsis))) $
+    run $
+    rawSql
+        "SELECT package_name.name, version.version, snapshot_hackage_package.synopsis \
+        \FROM package_name, version, hackage_cabal, snapshot_hackage_package \
+        \WHERE hackage_cabal.id = snapshot_hackage_package.cabal \
+        \AND hackage_cabal.name = package_name.id \
+        \AND hackage_cabal.version = version.id ORDER BY package_name.name ASC"
+        []
+
+
 
 getPackagesForSnapshot :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
 getPackagesForSnapshot sid =
-    liftM (map toPLI) $
+    liftM (map toPackageListingInfo) $
     run $
     rawSql
         "SELECT package_name.name, version.version, \
@@ -428,28 +401,27 @@ getPackagesForSnapshot sid =
         \AND hackage_cabal.version = version.id ORDER BY package_name.name ASC"
         [toPersistValue sid]
   where
-    toPLI (Single name, Single version, Single isCore, Single synopsis) =
+    toPackageListingInfo (Single name, Single version, Single isCore, Single synopsis) =
         PackageListingInfo
             {pliName = name, pliVersion = version, pliSynopsis = synopsis, pliIsCore = isCore}
 
 
-getPackageVersionBySnapshot
+getPackageVersionForSnapshot
   :: GetStackageDatabase env m
   => SnapshotId -> PackageNameP -> m (Maybe VersionP)
-getPackageVersionBySnapshot sid name = liftM (listToMaybe . map toPLI) $ run $ do
-    E.select $ E.from $ \(p,sp) -> do
-        E.where_ $
-            (p E.^. PackageId E.==. sp E.^. SnapshotPackagePackage) E.&&.
-            (sp E.^. SnapshotPackageSnapshot E.==. E.val sid) E.&&.
-            (E.lower_ (p E.^. PackageName) E.==. E.lower_ (E.val name))
-        E.orderBy [E.asc $ E.lower_ $ p E.^. PackageName]
-        return
-            ( sp E.^. SnapshotPackageVersion
-            )
-  where
-    toPLI (E.Value version) = version
+getPackageVersionForSnapshot snapshotId pname =
+    fmap unSingle . listToMaybe <$>
+    run (rawSql
+             "SELECT version.version \
+             \FROM package_name, version, hackage_cabal, snapshot_hackage_package \
+             \WHERE snapshot_hackage_package.snapshot = ? \
+             \AND package_name.name = ? \
+             \AND hackage_cabal.id = snapshot_hackage_package.cabal \
+             \AND hackage_cabal.name = package_name.id \
+             \AND hackage_cabal.version = version.id ORDER BY package_name.name ASC"
+             [toPersistValue snapshotId, toPersistValue pname])
 
--- TODO: fix dpendence on SnapshotHackagePackage
+-- TODO: fix dependence on SnapshotHackagePackage
 getSnapshotModules ::
     GetStackageDatabase env m => SnapshotId -> Bool -> m [ModuleListingInfo]
 getSnapshotModules sid hasDoc =
@@ -502,17 +474,6 @@ markModuleHasDocs ::
     -> m ()
 markModuleHasDocs snapshotId (PackageIdentifierP pname ver, modName) =
   return () -- TODO: implement
-
-lookupSnapshotPackage
-    :: GetStackageDatabase env m
-    => SnapshotId
-    -> PackageNameP
-    -> m (Maybe (Entity SnapshotPackage))
-lookupSnapshotPackage sid pname = run $ do
-    mp <- getBy $ UniquePackage pname
-    case mp of
-        Nothing -> return Nothing
-        Just (Entity pid _) -> getBy $ UniqueSnapshotPackage sid pid
 
 
 getPantryHackageCabal
@@ -747,8 +708,6 @@ getReverseDepsCount snapName hackageCabalId =
         \AND snapshot.name = ?"
         [toPersistValue hackageCabalId, toPersistValue snapName]
 
-getPackage :: GetStackageDatabase env m => PackageNameP -> m (Maybe (Entity Package))
-getPackage = run . getBy . UniquePackage
 
 getSnapshotsForPackage
     :: GetStackageDatabase env m
@@ -849,11 +808,6 @@ snapshotsJSON = do
         "lts-" <> show major <> "." <> show minor
 
     printNightly day = "nightly-" <> T.pack (show day)
-
-getPackageCount :: GetStackageDatabase env m
-                => SnapshotId
-                -> m Int
-getPackageCount sid = run $ count [SnapshotPackageSnapshot ==. sid]
 
 getLatestLtsByGhc :: GetStackageDatabase env m
                   => m [(Int, Int, Text, Day)]

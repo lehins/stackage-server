@@ -37,8 +37,7 @@ getPackageBadgeR pname branch = track "Handler.Package.getPackageBadgeR" $ do
     cacheSeconds (3 * 60 * 60)
     snapName     <- maybe notFound pure =<< newestSnapshot branch
     Entity sid _ <- maybe notFound pure =<< lookupSnapshot snapName
-    mVersion <- do mSnapPackage <- lookupSnapshotPackage sid pname
-                   pure (snapshotPackageVersion . entityVal <$> mSnapPackage)
+    mVersion <- getPackageVersionForSnapshot sid pname
 
     mLabel <- lookupGetParam "label"
     mStyle <- lookupGetParam "style"
