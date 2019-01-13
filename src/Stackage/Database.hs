@@ -1,14 +1,18 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE LambdaCase #-}
 module Stackage.Database
-    ( PostgresConf (..)
-    , SnapName (..)
-    , SnapshotId ()
-    , Snapshot(..)
+    ( -- * Database
+      PostgresConf (..)
     , StackageDatabase
     , GetStackageDatabase(..)
+    , openStackageDatabase
     , closeStackageDatabase
+    , runStackageMigrations
+    , Unique(..)
+    -- * Snapshot
+    , Snapshot(..)
+    , SnapName (..)
+    , SnapshotId ()
     , newestSnapshot
     , newestLTS
     , newestLTSMajor
@@ -19,16 +23,25 @@ module Stackage.Database
     , snapshotTitle
     , snapshotPrettyName
     , snapshotPrettyNameShort
+    , snapshotMarkUpdated
+    , insertSnapshotName
+    -- * Packages
+    -- ** Addition
+    , insertHackagePackageModules
+    , insertHackagePackageDeps
+    -- ** Retrieval
+    , getHackageCabal
+    , getPantryHackageCabal
     , getAllPackages
     , getPackagesForSnapshot
     , getPackageVersionBySnapshot
-    , createStackageDatabase
-    , openStackageDatabase
     , getSnapshotModules
     , getPackageModules
     , SnapshotPackage (..)
     , lookupSnapshotPackage
     , SnapshotHackagePackage(..)
+    -- * Deprecations
+    , addDeprecated
     , getDeprecated
     , getLatests
     , getHackageLatestVersion
@@ -49,26 +62,17 @@ module Stackage.Database
     , snapshotsJSON
     , getPackageCount
     , getLatestLtsByGhc
-    , cloneOrUpdate
     ) where
 
 import RIO
 import RIO.Time
-import RIO.Process
 import qualified RIO.Text as T
 import qualified RIO.Set as Set
 import qualified RIO.Map as Map
-import qualified Data.ByteString.Lazy.Char8 as LBS8
-import qualified Data.ByteString.Char8 as BS8
-import RIO.FilePath
-import RIO.Directory (doesDirectoryExist)
-import Conduit
 import qualified Data.List  as L
-import Database.Esqueleto.Internal.Language (From)
 import Text.Blaze.Html (Html)
 import Stackage.Database.Types
 import Stackage.Database.PackageInfo
-import Data.Yaml (decodeFileEither)
 import Data.Bifunctor (bimap)
 import Database.Persist
 import Database.Persist.Postgresql
@@ -78,23 +82,14 @@ import qualified Database.Esqueleto as E
 import qualified Data.Aeson as A
 import Types (SnapshotBranch(..), PackageVersionRev(..), VersionRev(..))
 import Data.Pool (destroyAllResources)
-import Pantry.Types
-    ( PantryConfig(pcStorage)
-    , HasPantryConfig(..)
-    , PackageNameP(..)
-    , Revision(..)
-    , PackageIdentifierRevision(..)
-    , CabalFileInfo(..)
-    , BlobKey(..)
-    , Storage(Storage)
-    , VersionP(..)
-    )
+import Pantry.Types (BlobKey(..), HasPantryConfig(..), PantryConfig(pcStorage), Storage(Storage))
 import Pantry.Storage hiding (migrateAll)
 import qualified Pantry.Storage as Pantry (migrateAll)
-import Pantry.Hackage (DidUpdateOccur(..), forceUpdateHackageIndex, getHackageTarballOnGPD)
 import Control.Monad.Trans.Class (lift)
 import Types
 import Distribution.Types.VersionRange (VersionRange)
+
+
 
 currentSchema :: Int
 currentSchema = 2
@@ -174,11 +169,22 @@ Deprecated
 instance A.ToJSON Snapshot where
   toJSON Snapshot{..} =
     A.object [ "name"     A..= snapshotName
-             , "ghc"      A..= VersionP ghc -- TODO: deprecate
+             , "ghc"      A..= VersionP ghc -- TODO: deprecate, since encapsulated in compiler?
              , "compiler" A..= snapshotCompiler
              , "created"  A..= formatTime defaultTimeLocale "%F" snapshotCreated
              ]
     where CompilerGHC ghc = snapshotCompiler
+
+-- | Re-use Pantry's database connection pool
+type StackageDatabase = Storage
+
+class MonadIO m => GetStackageDatabase env m | m -> env where
+    getStackageDatabase :: m StackageDatabase
+-- instance (HasStorage env, MonadIO m) => GetStackageDatabase env (ReaderT env m) where
+--     getStackageDatabase = view storageG
+instance HasPantryConfig env => GetStackageDatabase env (RIO env) where
+    getStackageDatabase = pcStorage <$> view pantryConfigL
+
 
 _hideUnusedWarnings
     :: ( SnapshotPackageId
@@ -188,6 +194,7 @@ _hideUnusedWarnings
        , NightlyId
        , ModuleId
        , HackagePackageModuleId
+       , PackageId
        , DepId
        , HackageDepId
        , DeprecatedId
@@ -195,280 +202,10 @@ _hideUnusedWarnings
 _hideUnusedWarnings _ = ()
 
 
-closeStackageDatabase :: GetStackageDatabase env m => m ()
-closeStackageDatabase = do
+run :: GetStackageDatabase env m => SqlPersistT IO a -> m a
+run inner = do
     Storage pool <- getStackageDatabase
-    liftIO $ destroyAllResources pool
-
--- | Re-use Pantry's database connection pool
-type StackageDatabase = Storage
-
-class MonadIO m => GetStackageDatabase env m | m -> env where
-    getStackageDatabase :: m Storage
--- instance (HasStorage env, MonadIO m) => GetStackageDatabase env (ReaderT env m) where
---     getStackageDatabase = view storageG
-instance HasPantryConfig env => GetStackageDatabase env (RIO env) where
-    getStackageDatabase = pcStorage <$> view pantryConfigL
-
-sourceSnapshots ::
-       ConduitT a (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile)) (ResourceT (RIO StackageCron)) ()
-sourceSnapshots = do
-    rootDir <- scStackageRoot <$> lift ask
-    snapshotsDir <- lift $ cloneOrUpdate rootDir "commercialhaskell" "stackage-snapshots"
-    sourceDirectoryDeep False (snapshotsDir </> "lts") .| concatMapMC (getLtsParser snapshotsDir)
-    sourceDirectoryDeep False (snapshotsDir </> "nightly") .|
-        concatMapMC (getNightlyParser snapshotsDir)
-  where
-    getSnapshotParser gitDir fp mCreateDate snapName = do
-        let gitLog args =
-                withWorkingDir gitDir $ proc "git" ("log" : (args ++ [fp])) readProcessStdout_
-        let parseGitDate fmt dates =
-                try $ do
-                    date <-
-                        maybe (error "Git dates list is empty") return $
-                        listToMaybe $ LBS8.lines dates
-                    parseTimeM False defaultTimeLocale fmt (LBS8.unpack date)
-            parseSnapshot updatedOn = do
-                esnap <- liftIO $ decodeFileEither fp
-                case esnap of
-                    Right snap
-                        | snapName == sfName snap -> do
-                            let createdOn =
-                                    sfCreatedOn snap <|> mCreateDate <|> Just (utctDay updatedOn)
-                            return $ Just snap {sfCreatedOn = createdOn}
-                    Right snap -> do
-                        logError $
-                            "Snapshot name mismath. Received: " <> displayShow (sfName snap) <>
-                            " in the file: " <>
-                            display (T.pack fp)
-                        return Nothing
-                    Left exc -> do
-                        logError $ display $ T.pack $ displayException exc
-                        return Nothing
-        lastCommitTimestamps <- lift $ gitLog ["-1", "--format=%cD"]
-        eUpdatedOn <- parseGitDate rfc822DateFormat lastCommitTimestamps
-        case eUpdatedOn of
-            Left (exc :: SomeException) -> do
-                logError $ "Error parsing git commit date: " <> fromString (displayException exc)
-                return Nothing
-            Right updatedOn -> do
-                env <- lift ask
-                return $ Just $ (,,) snapName updatedOn $ runRIO env (parseSnapshot updatedOn)
-    getLtsParser gitDir fp = do
-        case mapM (BS8.readInt . BS8.pack) $ take 2 $ reverse (splitPath fp) of
-            Just [(minor, ".yaml"), (major, "/")] ->
-                getSnapshotParser gitDir fp Nothing $ SNLts major minor
-            _ -> do
-                logError
-                    ("Couldn't parse the filepath into an LTS version: " <> display (T.pack fp))
-                return Nothing
-    getNightlyParser gitDir fp = do
-        case mapM (BS8.readInt . BS8.pack) $ take 3 $ reverse (splitPath fp) of
-            Just [(day, ".yaml"), (month, "/"), (year, "/")]
-                | Just date <- fromGregorianValid (fromIntegral year) month day ->
-                    getSnapshotParser gitDir fp (Just date) $ SNNightly date
-            _ -> do
-                logError
-                    ("Couldn't parse the filepath into a Nightly date: " <> display (T.pack fp))
-                return Nothing
-
-createOrUpdateSnapshot ::
-       Bool
-    -> Map Compiler [(HackageCabalId, RIO StackageCron PackageInfo)]
-    -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
-    -> RIO StackageCron ()
-createOrUpdateSnapshot forceUpdate corePackages (snapName, updatedOn, parseSnapshotFile) = do
-    mSnap <- withStorage $ getBy (UniqueSnapshot snapName)
-    -- Decide if creation or an update is necessary:
-    mKeySnapFile <-
-        case mSnap of
-            Just (Entity _key snap)
-                | snapshotUpdatedOn snap == Just updatedOn && not forceUpdate -> do
-                    logInfo $
-                        "Snapshot with name: " <> display snapName <>
-                        " already exists and is up to date."
-                    return Nothing
-            Just (Entity key snap)
-                | Nothing <- snapshotUpdatedOn snap -> do
-                    logWarn $
-                        "Snapshot with name: " <> display snapName <>
-                        " did not finish updating last time."
-                    fmap (Just key, ) <$> parseSnapshotFile
-            Just (Entity key _snap) -> do
-                unless forceUpdate $
-                    logWarn $
-                    "Snapshot with name: " <> display snapName <>
-                    " was updated, applying new patch."
-                fmap (Just key, ) <$> parseSnapshotFile
-            Nothing -> fmap (Nothing, ) <$> parseSnapshotFile
-    -- Add new snapshot to the database, when necessary
-    mKeySnapFileAdded <-
-        withStorage $
-        case mKeySnapFile of
-            Just (Just snapKey, sf) -> return $ Just (snapKey, sf)
-            Just (Nothing, sf@SnapshotFile {sfName, sfCompiler, sfCreatedOn})
-                | Just createdOn <- sfCreatedOn ->
-                    fmap (, sf) <$> insertUnique (Snapshot sfName sfCompiler createdOn Nothing)
-            _ -> return Nothing
-    forM_ mKeySnapFileAdded $ \(snapKey, SnapshotFile {sfName, sfCompiler, sfHidden, sfPackages}) -> do
-        withStorage $
-            case sfName of
-                SNLts major minor -> void $ insertUnique $ Lts snapKey major minor
-                SNNightly day -> void $ insertUnique $ Nightly snapKey day
-        case Map.lookup sfCompiler corePackages of
-            Nothing -> logError $ "Hints are not found for the compiler: " <> display sfCompiler
-            Just compilerCorePackages ->
-                forM_ compilerCorePackages $ \(hackageCabalKey, getPI) -> do
-                    piCore <- getPI
-                    withStorage $
-                        addSnapshotHackagePackage True snapKey hackageCabalKey False piCore
-        let totalPackages = length sfPackages
-            addPantryPackageWithReport (prevSucc, countPackages) pp = do
-                let PantryCabal {pcPackageName, pcPackageVersion} = ppPantryCabal pp
-                    isHidden = fromMaybe False (Map.lookup pcPackageName sfHidden)
-                logSticky $
-                    "Loading " <> display sfName <> "(" <> displayShow countPackages <> "/" <>
-                    displayShow totalPackages <>
-                    "): " <> display (PackageIdentifierP pcPackageName pcPackageVersion)
-                curSucc <- addPantryPackage forceUpdate snapKey isHidden pp
-                pure (curSucc && prevSucc, countPackages + 1)
-        pantryUpdateSucceeded <-
-            fst <$> foldM addPantryPackageWithReport (True, 0 :: Int) sfPackages
-        docUpdateSucceeded <- checkForDocs sfName
-        if pantryUpdateSucceeded && docUpdateSucceeded
-            then do
-                withStorage $ update snapKey [SnapshotUpdatedOn =. Just updatedOn]
-                logInfo $ "Created or updated snapshot '" <> display sfName <> "' successfully"
-            else logError $ "There were errors while adding snapshot '" <> display sfName <> "'"
-
-addPantryPackage :: Bool -> SnapshotId -> Bool -> PantryPackage -> RIO StackageCron Bool
-addPantryPackage _forceUpdate snapKey isHidden (PantryPackage pc treeKey) =
-    withStorage (getPantryHackageCabal pc) >>= \case
-        Nothing -> do
-            logError $
-                "Couldn't find a valid hackage cabal file " <> "in pantry corresponding to: " <>
-                display pc
-            return False
-        Just (hackageCabalKey, cabalBlobId) -> do
-            didUpdateRef <- newIORef False
-            let pnameVer = PackageIdentifierP (pcPackageName pc) (pcPackageVersion pc)
-                onGPD gpd = do
-                    addSnapshotHackagePackage
-                        False
-                        snapKey
-                        hackageCabalKey
-                        isHidden
-                        (toPackageInfo gpd)
-                    insertHackagePackageModules hackageCabalKey (getModuleNames gpd)
-                    insertHackageDeps pnameVer hackageCabalKey (extractDependencies gpd)
-                    writeIORef didUpdateRef True
-            _ <-
-                getHackageTarballOnGPD
-                    (withStorage . onGPD)
-                    (toPackageIdentifierRevision pc)
-                    (Just treeKey)
-            unlessM (readIORef didUpdateRef) $
-                withStorage $ do
-                    isNotLoaded <-
-                            isNothing <$>
-                            getBy (UniqueSnapshotHackagePackage snapKey hackageCabalKey)
-                    -- whenM ((||) <$> pure forceUpdate <*> isNotLoaded) $ do
-                    when isNotLoaded $ do
-                        gpd <- parseCabalBlob <$> loadBlobById cabalBlobId
-                        onGPD gpd
-            return True
-
-
-
-addSnapshotHackagePackage ::
-       MonadIO m
-    => Bool
-    -> Key Stackage.Database.Snapshot
-    -> HackageCabalId
-    -> Bool
-    -> PackageInfo
-    -> ReaderT SqlBackend m ()
-addSnapshotHackagePackage isCore snapKey hackageCabalKey isHidden gpd = do
-    let synopsis = piSynopsis gpd
-        readme = ""
-        changelog = ""
-    void $
-        insertBy $
-        SnapshotHackagePackage snapKey hackageCabalKey isCore synopsis readme changelog isHidden
-    return ()
-
-getCorePackages :: RIO StackageCron (Map Compiler [(HackageCabalId, RIO StackageCron PackageInfo)])
-getCorePackages = do
-    rootDir <- scStackageRoot <$> ask
-    contentDir <- cloneOrUpdate rootDir "commercialhaskell" "stackage-content"
-    liftIO (decodeFileEither (contentDir </> "stack" </> "global-hints.yaml")) >>= \case
-        Right (hints :: Map Compiler (Map PackageNameP VersionP)) ->
-            traverse (fmap Map.elems . Map.traverseMaybeWithKey getCabalId) hints
-        Left exc -> do
-            logError $
-                "Error parsing 'global-hints.yaml' file: " <> fromString (displayException exc)
-            return mempty
-  where
-    getCabalId pname ver = do
-        let pid = PackageIdentifierP pname ver
-            pir =
-                PackageIdentifierRevision
-                    (unPackageNameP pname)
-                    (unVersionP ver)
-                    (CFIRevision (Revision 0))
-        withStorage (getHackageCabal pname ver Nothing) >>= \case
-            Nothing -> do
-                logError $
-                    "Core package from global-hints: '" <> display pid <>
-                    "' was not found in pantry."
-                return Nothing
-            Just (hcid, bid) -> do
-                mpiRef <- newIORef Nothing
-                let onGPD gpd =
-                        withStorage $ do
-                            insertHackagePackageModules hcid (getModuleNames gpd)
-                            insertHackageDeps pid hcid (extractDependencies gpd)
-                            let packageInfo = toPackageInfo gpd
-                            writeIORef mpiRef $ Just packageInfo
-                let getMemoPackageInfo =
-                        readIORef mpiRef >>= \case
-                            Just packageInfo -> return packageInfo
-                            Nothing -> do
-                                logSticky $ "Loading core package: " <> display pid
-                                _ <- getHackageTarballOnGPD onGPD pir Nothing
-                                readIORef mpiRef >>= \case
-                                    Nothing -> do
-                                        gpd <- parseCabalBlob <$> withStorage (loadBlobById bid)
-                                        let packageInfo = toPackageInfo gpd
-                                        writeIORef mpiRef $ Just packageInfo
-                                        pure packageInfo
-                                    Just packageInfo -> pure packageInfo
-                return $ Just (hcid, getMemoPackageInfo)
-
--- | Download a list of available .html files from S3 bucket for a particular resolver and record
--- in the database which modules have documentation available for them.
-checkForDocs :: Monad m => SnapName -> m Bool
-checkForDocs _sname = return True
-
-
-cloneOrUpdate ::
-       (MonadReader env m, HasLogFunc env, HasProcessContext env, MonadIO m)
-    => FilePath
-    -> String
-    -> String
-    -> m FilePath
-cloneOrUpdate root org name = do
-    exists <- doesDirectoryExist dest
-    if exists
-        then withWorkingDir dest $ do
-            proc "git" ["fetch"] runProcess_
-            proc "git" ["reset", "--hard", "origin/master"] runProcess_
-        else withWorkingDir root $ do
-            proc "git" ["clone", url, name] runProcess_
-    return dest
-  where
-    url = "https://github.com/" <> org <> "/" <> name <> ".git"
-    dest = root </> name
+    liftIO $ runSqlPool inner pool
 
 
 openStackageDatabase :: MonadIO m => PostgresConf -> m Storage
@@ -477,40 +214,35 @@ openStackageDatabase pg = liftIO $ do
       (pgConnStr pg)
       (pgPoolSize pg)
 
-getSchema :: RIO StackageCron (Maybe Int)
+closeStackageDatabase :: GetStackageDatabase env m => m ()
+closeStackageDatabase = do
+    Storage pool <- getStackageDatabase
+    liftIO $ destroyAllResources pool
+
+
+getSchema :: ReaderT SqlBackend (RIO StackageCron) (Maybe Int)
 getSchema = do
-    eres <- tryAny $ run (selectList [] [])
-    logInfo $ "getSchema result: " <> displayShow eres
+    eres <- tryAny (selectList [] [])
+    lift $ logInfo $ "getSchema result: " <> displayShow eres
     case eres of
         Right [Entity _ (Schema v)] -> return $ Just v
         _ -> return Nothing
 
-createStackageDatabase :: RIO StackageCron [Deprecation] -> RIO StackageCron ()
-createStackageDatabase getDeprecations = do
-    logInfo "Entering createStackageDatabase"
-    actualSchema <- getSchema
-    let schemaMatch = actualSchema == Just currentSchema
-    forceFullUpdate <- sfForceFullUpdate <$> ask
-    unless schemaMatch $ do
-        logWarn $
-            "Current schema does not match actual schema: " <>
-            displayShow (actualSchema, currentSchema)
+runStackageMigrations :: RIO StackageCron ()
+runStackageMigrations =
     withStorage $ do
+        actualSchema <- getSchema
         runMigration Pantry.migrateAll
         runMigration migrateAll
-    unless schemaMatch $ withStorage $ insert_ $ Schema currentSchema
-    didUpdate <- forceUpdateHackageIndex (Just "stackage-server cron job")
-    case didUpdate of
-        UpdateOccurred -> do
-            logInfo "Updated hackage index. Getting deprecated info now"
-            getDeprecations >>= withStorage . mapM_ addDeprecated
-        NoUpdateOccurred -> do
-            logInfo "No new packages in hackage index"
-    corePackages <- getCorePackages
-    runConduitRes $
-        sourceSnapshots .|
-        mapM_C (lift . createOrUpdateSnapshot forceFullUpdate corePackages)
-    withStorage $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
+        unless (actualSchema == Just currentSchema) $ do
+            lift $
+                logWarn $
+                "Current schema does not match actual schema: " <>
+                displayShow (actualSchema, currentSchema)
+            deleteWhere ([] :: [Filter Schema])
+            insert_ $ Schema currentSchema
+
+
 
 insertHackagePackageModules ::
        MonadIO m => HackageCabalId -> [ModuleNameP] -> ReaderT SqlBackend m ()
@@ -519,13 +251,13 @@ insertHackagePackageModules hackageCabalKey = mapM_ $ \ moduleName -> do
   void $ insertBy (HackagePackageModule hackageCabalKey eModuleId False)
 
 
-insertHackageDeps ::
+insertHackagePackageDeps ::
        (MonadIO m, MonadReader env m, HasLogFunc env)
     => PackageIdentifierP
     -> HackageCabalId
     -> Map PackageNameP VersionRange
     -> ReaderT SqlBackend m ()
-insertHackageDeps pid hackageCabalKey dependencies =
+insertHackagePackageDeps pid hackageCabalKey dependencies =
     forM_ (Map.toList dependencies) $ \(dep, range) ->
         getBy (UniquePackageName dep) >>= \case
             Just pname -> do
@@ -554,10 +286,11 @@ addDeprecated (Deprecation pname inFavourOfNameSet) = do
                         (\name mid -> maybe (Left name) Right mid)
                         inFavourOfNames
                         inFavourOfAllIds
-            _ <- upsertBy
-                (UniqueDeprecated packageNameId)
-                (Deprecated packageNameId inFavourOfIds)
-                [DeprecatedInFavourOf =. inFavourOfIds]
+            void $
+                upsertBy
+                    (UniqueDeprecated packageNameId)
+                    (Deprecated packageNameId inFavourOfIds)
+                    [DeprecatedInFavourOf =. inFavourOfIds]
             when (not (null badNames)) $
                 lift $
                 logError $
@@ -583,12 +316,6 @@ getDeprecated pname =
             Nothing -> return defRes
   where
     defRes = (False, [])
-
-
-run :: GetStackageDatabase env m => SqlPersistT IO a -> m a
-run inner = do
-    Storage pool <- getStackageDatabase
-    liftIO $ runSqlPool inner pool
 
 
 newestSnapshot :: GetStackageDatabase env m => SnapshotBranch -> m (Maybe SnapName)
@@ -643,6 +370,18 @@ ltsBefore x y = do
         [Desc LtsMajor, Desc LtsMinor]
   where
     go (Entity _ lts) = (ltsSnap lts, SNLts (ltsMajor lts) (ltsMinor lts))
+
+
+snapshotMarkUpdated :: GetStackageDatabase env m => SnapshotId -> UTCTime -> m ()
+snapshotMarkUpdated snapKey updatedOn = run $ update snapKey [SnapshotUpdatedOn =. Just updatedOn]
+
+insertSnapshotName :: GetStackageDatabase env m => SnapshotId -> SnapName -> m ()
+insertSnapshotName snapKey snapName =
+    run $
+    case snapName of
+        SNLts major minor -> void $ insertUnique $ Lts snapKey major minor
+        SNNightly day -> void $ insertUnique $ Nightly snapKey day
+
 
 lookupSnapshot :: GetStackageDatabase env m => SnapName -> m (Maybe (Entity Snapshot))
 lookupSnapshot name = run $ getBy $ UniqueSnapshot name

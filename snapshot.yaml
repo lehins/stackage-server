@@ -16,3 +16,4 @@ packages:
 - yaml-0.10.4.0@rev:0 #for hpack-0.31
 - lens-4.17
 - rio-0.1.8.0
+- unliftio-0.2.10

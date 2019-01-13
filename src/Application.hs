@@ -37,14 +37,14 @@ import           Yesod.Default.Config2
 import           Yesod.Default.Handlers
 import           Yesod.GitRepo
 import           System.Process (rawSystem)
-import           Stackage.Database (openStackageDatabase, PostgresConf (..), cloneOrUpdate)
+import           Stackage.Database (openStackageDatabase, PostgresConf (..))
 import           Stackage.Database.Cron (newHoogleLocker, singleRun)
+import           Stackage.Database.Github (getStackageContentDir)
 import           Control.AutoUpdate
 import           Control.Concurrent (threadDelay)
 import           Yesod.GitRev (tGitRev)
 
 -- Import all relevant handler modules here.
--- Don't forget to add new modules to your cabal file!
 import           Handler.Home
 import           Handler.Snapshots
 import           Handler.StackageHome
@@ -119,7 +119,7 @@ makeFoundation logFunc appSettings = do
 
     appWebsiteContent <- if appDevDownload appSettings
         then do
-            fp <- runSimpleApp $ cloneOrUpdate "." "fpco" "stackage-content"
+            fp <- runSimpleApp $ getStackageContentDir "."
             gitRepoDev fp loadWebsiteContent
         else gitRepo
             "https://github.com/fpco/stackage-content.git"
