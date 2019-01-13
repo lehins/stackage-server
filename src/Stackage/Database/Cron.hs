@@ -144,7 +144,7 @@ stackageServerCron forceUpdate = do
     -- Hacky approach instead of PID files
     _ <- liftIO $ catchIO (bindPortTCP 17834 "127.0.0.1") $ \_ ->
         error $ "cabal loader process already running, exiting"
-    let connectionCount = 2
+    connectionCount <- getNumCapabilities
     storage <- initStorage connectionCount
     lo <- logOptionsHandle stdout True
     stackageRootDir <- getAppUserDataDirectory "stackage"
@@ -416,20 +416,29 @@ updateSnapshot forceUpdate corePackages snapKey SnapshotFile {..} = do
             forM_ compilerCorePackages $ \(hackageCabalKey, getPI) -> do
                 piCore <- getPI
                 withStorage $ addSnapshotHackagePackage True snapKey hackageCabalKey False piCore
+    loadedPackageCountRef <- newIORef (0 :: Int)
     let totalPackages = length sfPackages
-        addPantryPackageWithReport (prevSucc, countPackages) pp = do
-            let PantryCabal {pcPackageName, pcPackageVersion} = ppPantryCabal pp
+        progressReporter =
+            forever $ do
+                loadedPackageCount <- readIORef loadedPackageCountRef
+                logSticky $
+                    "Loading snapshot '" <> display sfName <> "' (" <> displayShow loadedPackageCount <> "/" <>
+                    displayShow totalPackages <>
+                    ")"
+                threadDelay 1000000
+        addPantryPackageWithReport pp = do
+            let PantryCabal {pcPackageName} = ppPantryCabal pp
                 isHidden = fromMaybe False (Map.lookup pcPackageName sfHidden)
-            logSticky $
-                "Loading " <> display sfName <> "(" <> displayShow countPackages <> "/" <>
-                displayShow totalPackages <>
-                "): " <>
-                display (PackageIdentifierP pcPackageName pcPackageVersion)
             curSucc <- addPantryPackage forceUpdate snapKey isHidden pp
-            pure (curSucc && prevSucc, countPackages + 1)
-    pantryUpdateSucceeded <- fst <$> foldM addPantryPackageWithReport (True, 0 :: Int) sfPackages
+            atomicModifyIORef' loadedPackageCountRef (\c -> (c + 1, ()))
+            pure curSucc
+    -- ensure we leave off 2 capabilites, one for doc loader another for the system.
+    caps <- -- max 1 . subtract 2 <$>
+      getNumCapabilities
+    ePantryUpdatesSucceeded <-
+        race progressReporter $ pooledMapConcurrentlyN caps addPantryPackageWithReport sfPackages
     docUpdateSucceeded <- checkForDocs sfName
-    return (pantryUpdateSucceeded && docUpdateSucceeded)
+    return (either (const False) and ePantryUpdatesSucceeded && docUpdateSucceeded)
 
 createOrUpdateSnapshot ::
        Bool
@@ -655,15 +664,16 @@ pathToPackageModule txt =
 
 runStackageUpdate :: RIO StackageCron ()
 runStackageUpdate = do
-    let prefix = "lts-13.2/"
-    let req = listObjectsV2 (BucketName haddockBucketName) & lovPrefix .~ Just prefix
-    dir <- getCurrentDirectory
-    --createStackageDatabase getHackageDeprecations
-    runConduitRes $
-        sourcePagerAWS req (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
-        concatMapC (T.stripSuffix ".html") .|
-        concatMapC (T.stripPrefix prefix) .|
-        concatMapC pathToPackageModule .|
-        mapC encodeUtf8 .|
-        sinkFile (dir </> "lts-13.2.txt")
-    return ()
+    createStackageDatabase getHackageDeprecations
+
+    -- let prefix = "lts-13.2/"
+    -- let req = listObjectsV2 (BucketName haddockBucketName) & lovPrefix .~ Just prefix
+    -- dir <- getCurrentDirectory
+    -- runConduitRes $
+    --     sourcePagerAWS req (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
+    --     concatMapC (T.stripSuffix ".html") .|
+    --     concatMapC (T.stripPrefix prefix) .|
+    --     concatMapC pathToPackageModule .|
+    --     mapC encodeUtf8 .|
+    --     sinkFile (dir </> "lts-13.2.txt")
+
