@@ -12,7 +12,7 @@ module Stackage.Database
     -- * Snapshot
     , Snapshot(..)
     , SnapName (..)
-    , SnapshotId ()
+    , SnapshotId
     , newestSnapshot
     , newestLTS
     , newestLTSMajor
@@ -27,8 +27,9 @@ module Stackage.Database
     , insertSnapshotName
     -- * Packages
     -- ** Addition
-    , insertHackagePackageModules
+    , insertSnapshotPackageModules
     , insertHackagePackageDeps
+    , markModuleHasDocs
     -- ** Retrieval
     , getHackageCabal
     , getPantryHackageCabal
@@ -143,11 +144,11 @@ SnapshotHackagePackage
 Module
     name ModuleNameP
     UniqueModule name
-HackagePackageModule
-    cabal HackageCabalId
+SnapshotPackageModule
+    snapshotPackage SnapshotHackagePackageId
     module ModuleId
     hasDocs Bool
-    UniqueSnapshotModule cabal module
+    UniqueSnapshotHackagePackageModule snapshotPackage module
 HackageDep
     user HackageCabalId
     uses PackageNameId
@@ -193,7 +194,7 @@ _hideUnusedWarnings
        , LtsId
        , NightlyId
        , ModuleId
-       , HackagePackageModuleId
+       , SnapshotPackageModuleId
        , PackageId
        , DepId
        , HackageDepId
@@ -243,14 +244,16 @@ runStackageMigrations =
             insert_ $ Schema currentSchema
 
 
-
-insertHackagePackageModules ::
-       MonadIO m => HackageCabalId -> [ModuleNameP] -> ReaderT SqlBackend m ()
-insertHackagePackageModules hackageCabalKey = mapM_ $ \ moduleName -> do
+-- | Add all modules available for the package in a particular snapshot. Initially they are marked
+-- as with available documentation.
+insertSnapshotPackageModules ::
+       MonadIO m => SnapshotHackagePackageId -> [ModuleNameP] -> ReaderT SqlBackend m ()
+insertSnapshotPackageModules snapshotPackageId = mapM_ $ \ moduleName -> do
   eModuleId <- either entityKey id <$> insertBy (Module moduleName)
-  void $ insertBy (HackagePackageModule hackageCabalKey eModuleId False)
+  void $ insertBy (SnapshotPackageModule snapshotPackageId eModuleId False)
 
 
+-- | Add a list of all dependencies for the package together with version bounds
 insertHackagePackageDeps ::
        (MonadIO m, MonadReader env m, HasLogFunc env)
     => PackageIdentifierP
@@ -446,6 +449,7 @@ getPackageVersionBySnapshot sid name = liftM (listToMaybe . map toPLI) $ run $ d
   where
     toPLI (E.Value version) = version
 
+-- TODO: fix dpendence on SnapshotHackagePackage
 getSnapshotModules ::
     GetStackageDatabase env m => SnapshotId -> Bool -> m [ModuleListingInfo]
 getSnapshotModules sid hasDoc =
@@ -464,7 +468,7 @@ getSnapshotModules sid hasDoc =
                 \AND hackage_cabal.version = version.id \
                 \AND hackage_package_module.has_docs = ? \
                 \ORDER BY (module.name, package_name.name) ASC"
-                [toPersistValue sid, toPersistValue (not hasDoc)] --TODO: remove `not` when doc is verified
+                [toPersistValue sid, toPersistValue hasDoc]
   where
     toModuleListingInfo (Single moduleName, Single packageName, Single version) =
         ModuleListingInfo
@@ -472,6 +476,8 @@ getSnapshotModules sid hasDoc =
             , mliPackageIdentifier = PackageIdentifierP packageName version
             }
 
+
+-- TODO: fix dpendence on SnapshotHackagePackage
 getPackageModules
     :: MonadIO m
     => HackageCabalId
@@ -486,8 +492,16 @@ getPackageModules cabalId hasDoc =
         \AND hackage_package_module.cabal = ? \
         \AND hackage_package_module.has_docs = ? \
         \ORDER BY module.name ASC"
-        [toPersistValue cabalId, toPersistValue (not hasDoc)] --TODO: remove `not` when doc is verified
+        [toPersistValue cabalId, toPersistValue hasDoc]
 
+
+markModuleHasDocs ::
+       GetStackageDatabase env m
+    => SnapshotId
+    -> (PackageIdentifierP, ModuleNameP)
+    -> m ()
+markModuleHasDocs snapshotId (PackageIdentifierP pname ver, modName) =
+  return () -- TODO: implement
 
 lookupSnapshotPackage
     :: GetStackageDatabase env m
