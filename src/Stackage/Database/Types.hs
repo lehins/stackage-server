@@ -30,7 +30,7 @@ import           Database.Persist
 import           Database.Persist.Sql hiding (LogFunc)
 import           Network.AWS          (HasEnv(..), Env)
 import           Pantry.SHA256
-import           Pantry.Storage       (BlobId, HackageCabalId)
+import           Pantry.Storage       (BlobId, TreeId, HackageCabalId)
 import           Pantry.Types
 import           RIO
 import           RIO.Process          (HasProcessContext (..), ProcessContext)
@@ -120,6 +120,7 @@ instance HasProcessContext StackageCron where
 instance HasPantryConfig StackageCron where
     pantryConfigL = lens scPantryConfig (\c f -> c {scPantryConfig = f})
 
+
 newtype Compiler =
     CompilerGHC { ghcVersion :: Version }
     deriving (Eq, Ord)
@@ -130,18 +131,9 @@ instance Show Compiler where
 instance FromJSONKey Compiler where
     fromJSONKey = FromJSONKeyTextParser (either fail pure . parseCompiler)
 
-displayCompiler :: (Monoid a, IsString a) => Compiler -> a
-displayCompiler (CompilerGHC vghc) = "ghc-" <> dtDisplay vghc
-
-parseCompiler :: Text -> Either String Compiler
-parseCompiler txt =
-    case T.stripPrefix "ghc-" txt of
-        Just vTxt -> bimap displayException CompilerGHC $ parseVersionThrowing (T.unpack vTxt)
-        Nothing -> Left $ "Invalid prefix for compiler: " <> T.unpack txt
-
-
 instance Display Compiler where
     display = displayCompiler
+    textDisplay = displayCompiler
 instance ToJSON Compiler where
     toJSON = String . displayCompiler
 instance FromJSON Compiler where
@@ -151,6 +143,16 @@ instance PersistField Compiler where
     fromPersistValue v = fromPersistValue v >>= mapLeft T.pack . parseCompiler
 instance PersistFieldSql Compiler where
     sqlType _ = SqlString
+
+displayCompiler :: (Monoid a, IsString a) => Compiler -> a
+displayCompiler (CompilerGHC vghc) = "ghc-" <> dtDisplay vghc
+
+parseCompiler :: Text -> Either String Compiler
+parseCompiler txt =
+    case T.stripPrefix "ghc-" txt of
+        Just vTxt -> bimap displayException CompilerGHC $ parseVersionThrowing (T.unpack vTxt)
+        Nothing -> Left $ "Invalid prefix for compiler: " <> T.unpack txt
+
 
 
 data SnapshotFile = SnapshotFile
@@ -252,21 +254,33 @@ data PackageListingInfo = PackageListingInfo
 instance ToJSON PackageListingInfo where
     toJSON PackageListingInfo {..} =
         object
-            [ "name" .= pliName
-            , "version" .= pliVersion
+            [ "name"     .= pliName
+            , "version"  .= pliVersion
             , "synopsis" .= pliSynopsis
-            , "isCore" .= pliIsCore
+            , "isCore"   .= pliIsCore
             ]
 
 
 data HackageCabalInfo = HackageCabalInfo
-  { hciCabalId     :: !HackageCabalId
-  , hciBlobId      :: !BlobId
-  , hciPackageName :: !PackageNameP
-  , hciVersion     :: !VersionP
-  , hciRevision    :: !(Maybe Revision)
-  } deriving (Show, Eq)
+    { hciCabalId     :: !HackageCabalId
+    , hciCabalBlobId :: !BlobId         -- TODO: make part of SnapshotPackageInfo
+    , hciPackageName :: !PackageNameP   -- TODO: make part of SnapshotPackageInfo
+    , hciVersion     :: !VersionP       -- TODO: make part of SnapshotPackageInfo
+    , hciRevision    :: !(Maybe Revision)
+    } deriving (Show, Eq)
 
+data PackageOrigin =
+  HackageOrigin !HackageCabalInfo
+  deriving (Show, Eq)
+ -- etc. | GitRepo URL | MercurialRepo URL | Archive URL
+
+data SnapshotPackageInfo = SnapshotPackageInfo
+    { spiTreeId      :: !TreeId
+    , spiCabalBlobId :: !BlobId
+    , spiPackageName :: !PackageNameP
+    , spiVersion     :: !VersionP
+    , spiOrigin      :: !PackageOrigin
+    } deriving (Show, Eq)
 
 data ModuleListingInfo = ModuleListingInfo
     { mliModuleName        :: !ModuleNameP

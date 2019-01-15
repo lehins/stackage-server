@@ -91,8 +91,8 @@ packagePage mSnapCabal pname =
     checkSpam pname $ do
         (isDeprecated, inFavourOf) <- getDeprecated pname
         latests <- getLatests pname
-        --let latests = []
-        -- short circuit in case when we don't know about a package with such name
+        -- short circuit in case when we don't know about a package with such name on hackage
+        -- TODO: once other origins for packages are implemented this is no longer valid
         hackageLatest <- getHackageLatestVersion pname >>= maybe notFound return
         (mSnapName, hci) <-
             case mSnapCabal of
@@ -100,14 +100,14 @@ packagePage mSnapCabal pname =
                 Nothing ->
                     maybe (Nothing, hackageLatest) (first Just) <$> getSnapshotLatestVersion pname
         -- When package is present in a snapshot, also pullout modules that have documentaion available
-        (PackageInfo {..}, packageModules) <- getPackageInfo hci (isJust mSnapName)
+        (PackageInfo {..}, packageModules) <- getPackageInfo hci mSnapName
         (deps, depsCount, revDeps, revDepsCount) <-
             case mSnapName of
                 Nothing -> return ([], 0, [], 0)
                 Just snapName -> do
-                    deps <- getForwardDeps snapName (hciCabalId hci) $ Just maxDisplayedDeps
-                    revDeps <- getReverseDeps snapName (hciCabalId hci) (Just maxDisplayedDeps)
-                    (depsCount, revDepsCount) <- getDepsCount snapName (hciCabalId hci)
+                    deps <- getForwardHackageDeps snapName (hciCabalId hci) $ Just maxDisplayedDeps
+                    revDeps <- getReverseHackageDeps snapName (hciCabalId hci) (Just maxDisplayedDeps)
+                    (depsCount, revDepsCount) <- getHackageDepsCount snapName (hciCabalId hci)
                     return
                         ( map (first unPackageRev) deps
                         , depsCount
@@ -115,7 +115,7 @@ packagePage mSnapCabal pname =
                         , revDepsCount)
         let mdocs = (, piVersion, packageModules) <$> mSnapName
             hackageVersionRev = VersionRev (hciVersion hackageLatest) (hciRevision hackageLatest)
-            -- TODO: remove conditional add add pantry key and size
+            -- TODO: remove conditional and add pantry key and size
             mdisplayedVersion =
                 guard (hci /= hackageLatest) >> Just (VersionRev (hciVersion hci) (hciRevision hci))
             (packageDepsLink, packageRevDepsLink) =
@@ -146,7 +146,7 @@ packagePage mSnapCabal pname =
                      in $(widgetFile "hoogle-form")
             $(widgetFile "package")
   where
-    unPackageRev (PackageVersionRev pname _) = pname
+    unPackageRev (PackageVersionRev pname' _) = pname'
     enumerate = zip [0 :: Int ..]
     renderModules sname packageIdentifier = renderForest [] . moduleForest . coerce
       where

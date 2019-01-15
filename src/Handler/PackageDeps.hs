@@ -71,8 +71,8 @@ helper depType snapName hci =
     track "Handler.PackageDeps.helper" $ do
         let (depsGetter, header) =
                 case depType of
-                    Deps -> (getForwardDeps, "Dependencies for ")
-                    RevDeps -> (getReverseDeps, "Reverse dependencies on ")
+                    Deps -> (getForwardHackageDeps, "Dependencies for ")
+                    RevDeps -> (getReverseHackageDeps, "Reverse dependencies on ")
         deps <- depsGetter snapName (hciCabalId hci) Nothing
         render <- getUrlRender
         let title = toHtml $ header ++ toPathPiece (hciPackageName hci)

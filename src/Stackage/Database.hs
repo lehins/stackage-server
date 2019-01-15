@@ -9,8 +9,11 @@ module Stackage.Database
     , closeStackageDatabase
     , runStackageMigrations
     , Unique(..)
+    , EntityField(..)
     -- * Snapshot
     , Snapshot(..)
+    , Lts(..)
+    , Nightly(..)
     , SnapName (..)
     , SnapshotId
     , newestSnapshot
@@ -28,7 +31,6 @@ module Stackage.Database
     -- * Packages
     -- ** Addition
     , insertSnapshotPackageModules
-    , insertHackagePackageDeps
     , markModuleHasDocs
     -- ** Retrieval
     , getHackageCabal
@@ -37,8 +39,13 @@ module Stackage.Database
     , getPackagesForSnapshot
     , getPackageVersionForSnapshot
     , getSnapshotModules
-    , getPackageModules
-    , SnapshotHackagePackage(..)
+    , getSnapshotPackageModules
+    , SnapshotPackage(..)
+    -- * Dependencies
+    , insertHackageDeps
+    , getForwardHackageDeps
+    , getReverseHackageDeps
+    , getHackageDepsCount
     -- * Deprecations
     , addDeprecated
     , getDeprecated
@@ -46,9 +53,6 @@ module Stackage.Database
     , getHackageLatestVersion
     , getVersionForSnapshot
     , getSnapshotLatestVersion
-    , getForwardDeps
-    , getReverseDeps
-    , getDepsCount
     , getPackageInfo
     , getSnapshotsForPackage
     , getSnapshots
@@ -66,14 +70,13 @@ import qualified RIO.Text as T
 import qualified RIO.Set as Set
 import qualified RIO.Map as Map
 import qualified Data.List  as L
-import Text.Blaze.Html (Html)
 import Stackage.Database.Types
 import Stackage.Database.PackageInfo
 import Data.Bifunctor (bimap)
 import Database.Persist
 import Database.Persist.Postgresql
 import Database.Persist.TH
-import Control.Monad.Logger (runNoLoggingT)
+import Control.Monad.Logger (runNoLoggingT, runStdoutLoggingT)
 import qualified Database.Esqueleto as E
 import qualified Data.Aeson as A
 import Types (SnapshotBranch(..), PackageVersionRev(..), VersionRev(..))
@@ -110,23 +113,29 @@ Nightly
     snap SnapshotId
     day Day
     UniqueNightly day
-SnapshotHackagePackage
+SnapshotPackage
     snapshot SnapshotId
-    cabal HackageCabalId
+    tree TreeId
+    hackageCabal HackageCabalId Maybe
     isCore Bool
     synopsis Text
     readme Text
     changelog Text
     isHidden Bool -- used for pantry, but is not relevant for stackage
-    UniqueSnapshotHackagePackage snapshot cabal
+    UniqueSnapshotPackage snapshot tree
 Module
     name ModuleNameP
     UniqueModule name
 SnapshotPackageModule
-    snapshotPackage SnapshotHackagePackageId
+    snapshotPackage SnapshotPackageId
     module ModuleId
     hasDocs Bool
     UniqueSnapshotHackagePackageModule snapshotPackage module
+-- Dep -- off for now, until other sources are implemented
+--     user TreeId
+--     uses PackageNameId
+--     range Text
+--     UniqueDep user uses
 HackageDep
     user HackageCabalId
     uses PackageNameId
@@ -154,14 +163,13 @@ type StackageDatabase = Storage
 
 class MonadIO m => GetStackageDatabase env m | m -> env where
     getStackageDatabase :: m StackageDatabase
--- instance (HasStorage env, MonadIO m) => GetStackageDatabase env (ReaderT env m) where
---     getStackageDatabase = view storageG
+
 instance HasPantryConfig env => GetStackageDatabase env (RIO env) where
     getStackageDatabase = pcStorage <$> view pantryConfigL
 
 
 _hideUnusedWarnings
-    :: ( SnapshotHackagePackageId
+    :: ( SnapshotPackageId
        , SchemaId
        , LtsId
        , NightlyId
@@ -182,6 +190,7 @@ run inner = do
 openStackageDatabase :: MonadIO m => PostgresConf -> m Storage
 openStackageDatabase pg = liftIO $ do
     fmap Storage $ runNoLoggingT $ createPostgresqlPool
+    --fmap Storage $ runStdoutLoggingT $ createPostgresqlPool
       (pgConnStr pg)
       (pgPoolSize pg)
 
@@ -191,18 +200,19 @@ closeStackageDatabase = do
     liftIO $ destroyAllResources pool
 
 
-getSchema :: ReaderT SqlBackend (RIO StackageCron) (Maybe Int)
-getSchema = do
-    eres <- tryAny (selectList [] [])
-    lift $ logInfo $ "getSchema result: " <> displayShow eres
-    case eres of
-        Right [Entity _ (Schema v)] -> return $ Just v
-        _ -> return Nothing
+getSchema :: RIO StackageCron (Maybe Int)
+getSchema =
+    withStorage $ do
+        eres <- tryAny (selectList [] [])
+        lift $ logInfo $ "getSchema result: " <> displayShow eres
+        case eres of
+            Right [Entity _ (Schema v)] -> return $ Just v
+            _ -> return Nothing
 
 runStackageMigrations :: RIO StackageCron ()
-runStackageMigrations =
+runStackageMigrations = do
+    actualSchema <- getSchema
     withStorage $ do
-        actualSchema <- getSchema
         runMigration Pantry.migrateAll
         runMigration migrateAll
         unless (actualSchema == Just currentSchema) $ do
@@ -217,24 +227,42 @@ runStackageMigrations =
 -- | Add all modules available for the package in a particular snapshot. Initially they are marked
 -- as with available documentation.
 insertSnapshotPackageModules ::
-       MonadIO m => SnapshotHackagePackageId -> [ModuleNameP] -> ReaderT SqlBackend m ()
+       MonadIO m => SnapshotPackageId -> [ModuleNameP] -> ReaderT SqlBackend m ()
 insertSnapshotPackageModules snapshotPackageId = mapM_ $ \ moduleName -> do
   eModuleId <- either entityKey id <$> insertBy (Module moduleName)
   void $ insertBy (SnapshotPackageModule snapshotPackageId eModuleId False)
 
 
--- | Add a list of all dependencies for the package together with version bounds
-insertHackagePackageDeps ::
+-- -- | Add a list of all dependencies for the package together with version bounds
+-- _insertDeps ::
+--        (MonadIO m, MonadReader env m, HasLogFunc env)
+--     => PackageIdentifierP -- ^ For error reporting only.
+--     -> TreeId
+--     -> Map PackageNameP VersionRange
+--     -> ReaderT SqlBackend m ()
+-- _insertDeps pid treeId dependencies =
+--     forM_ (Map.toList dependencies) $ \(dep, range) ->
+--         getBy (UniquePackageName dep) >>= \case
+--             Just pname -> do
+--                 void $ insertBy (Dep treeId (entityKey pname) (dtDisplay range))
+--             Nothing ->
+--                 lift $
+--                 logWarn $
+--                 "Couldn't find a dependency of " <> display pid <> " in Pantry with name: " <>
+--                 display dep
+
+-- | Add a list of all dependencies for the hackage package together with version bounds
+insertHackageDeps ::
        (MonadIO m, MonadReader env m, HasLogFunc env)
-    => PackageIdentifierP
+    => PackageIdentifierP -- ^ For error reporting only.
     -> HackageCabalId
     -> Map PackageNameP VersionRange
     -> ReaderT SqlBackend m ()
-insertHackagePackageDeps pid hackageCabalKey dependencies =
+insertHackageDeps pid hackageCabalId dependencies =
     forM_ (Map.toList dependencies) $ \(dep, range) ->
         getBy (UniquePackageName dep) >>= \case
             Just pname -> do
-                void $ insertBy (HackageDep hackageCabalKey (entityKey pname) (dtDisplay range))
+                void $ insertBy (HackageDep hackageCabalId (entityKey pname) (dtDisplay range))
             Nothing ->
                 lift $
                 logWarn $
@@ -378,9 +406,9 @@ getAllPackages =
     liftM (map (\(Single name, Single ver, Single synopsis) -> (name, ver, synopsis))) $
     run $
     rawSql
-        "SELECT package_name.name, version.version, snapshot_hackage_package.synopsis \
-        \FROM package_name, version, hackage_cabal, snapshot_hackage_package \
-        \WHERE hackage_cabal.id = snapshot_hackage_package.cabal \
+        "SELECT package_name.name, version.version, snapshot_package.synopsis \
+        \FROM package_name, version, hackage_cabal, snapshot_package \
+        \WHERE hackage_cabal.id = snapshot_package.hackage_cabal \
         \AND hackage_cabal.name = package_name.id \
         \AND hackage_cabal.version = version.id ORDER BY package_name.name ASC"
         []
@@ -393,10 +421,10 @@ getPackagesForSnapshot sid =
     run $
     rawSql
         "SELECT package_name.name, version.version, \
-               \snapshot_hackage_package.is_core, snapshot_hackage_package.synopsis \
-        \FROM package_name, version, hackage_cabal, snapshot_hackage_package \
-        \WHERE snapshot_hackage_package.snapshot = ? \
-        \AND hackage_cabal.id = snapshot_hackage_package.cabal \
+               \snapshot_package.is_core, snapshot_package.synopsis \
+        \FROM package_name, version, hackage_cabal, snapshot_package \
+        \WHERE snapshot_package.snapshot = ? \
+        \AND hackage_cabal.id = snapshot_package.hackage_cabal \
         \AND hackage_cabal.name = package_name.id \
         \AND hackage_cabal.version = version.id ORDER BY package_name.name ASC"
         [toPersistValue sid]
@@ -413,10 +441,10 @@ getPackageVersionForSnapshot snapshotId pname =
     fmap unSingle . listToMaybe <$>
     run (rawSql
              "SELECT version.version \
-             \FROM package_name, version, hackage_cabal, snapshot_hackage_package \
-             \WHERE snapshot_hackage_package.snapshot = ? \
+             \FROM package_name, version, hackage_cabal, snapshot_package \
+             \WHERE snapshot_package.snapshot = ? \
              \AND package_name.name = ? \
-             \AND hackage_cabal.id = snapshot_hackage_package.cabal \
+             \AND hackage_cabal.id = snapshot_package.hackage_cabal \
              \AND hackage_cabal.name = package_name.id \
              \AND hackage_cabal.version = version.id ORDER BY package_name.name ASC"
              [toPersistValue snapshotId, toPersistValue pname])
@@ -430,10 +458,10 @@ getSnapshotModules sid hasDoc =
             rawSql
                 "SELECT module.name, package_name.name, version.version \
                 \FROM module, hackage_package_module, hackage_cabal, package_name, version, \
-                      \snapshot, snapshot_hackage_package \
+                      \snapshot, snapshot_package \
                 \WHERE snapshot.id = ? \
-                \AND snapshot_hackage_package.snapshot = snapshot.id \
-                \AND snapshot_hackage_package.cabal = hackage_cabal.id \
+                \AND snapshot_package.snapshot = snapshot.id \
+                \AND snapshot_package.hackage_cabal = hackage_cabal.id \
                 \AND hackage_package_module.cabal = hackage_cabal.id \
                 \AND hackage_package_module.module = module.id \
                 \AND hackage_cabal.name = package_name.id \
@@ -449,31 +477,105 @@ getSnapshotModules sid hasDoc =
             }
 
 
--- TODO: fix dpendence on SnapshotHackagePackage
-getPackageModules
+getSnapshotPackageModules
     :: MonadIO m
-    => HackageCabalId
+    => SnapshotPackageId
     -> Bool
     -> ReaderT SqlBackend m [ModuleNameP]
-getPackageModules cabalId hasDoc =
+getSnapshotPackageModules snapshotPackageId hasDocs =
     map unSingle <$>
     rawSql
         "SELECT module.name \
-        \FROM module, hackage_package_module \
-        \WHERE module.id = hackage_package_module.module \
-        \AND hackage_package_module.cabal = ? \
-        \AND hackage_package_module.has_docs = ? \
+        \FROM module, snapshot_package_module \
+        \WHERE module.id = snapshot_package_module.module \
+        \AND snapshot_package_module.snapshot_package = ? \
+        \AND snapshot_package_module.has_docs = ? \
         \ORDER BY module.name ASC"
-        [toPersistValue cabalId, toPersistValue hasDoc]
+        [toPersistValue snapshotPackageId, toPersistValue hasDocs]
+
+getSnapshotPackageId ::
+       MonadIO m
+    => SnapshotId
+    -> PackageIdentifierP
+    -> ReaderT SqlBackend m (Maybe SnapshotPackageId)
+getSnapshotPackageId snapshotId (PackageIdentifierP pname pver) =
+    fmap unSingle . listToMaybe <$>
+    rawSql
+        "SELECT snapshot_package.id \
+        \FROM snapshot_package, tree, package_name, version \
+        \WHERE tree.name = package_name.id \
+        \AND tree.version = version.id \
+        \AND snapshot_package.tree = tree.id \
+        \AND snapshot_package.snapshot = ? \
+        \AND package_name.name = ? \
+        \AND version.version = ?"
+        [toPersistValue snapshotId, toPersistValue pname, toPersistValue pver]
 
 
+-- | Returns `False` whenever package could not be found in the snapshot
 markModuleHasDocs ::
        GetStackageDatabase env m
     => SnapshotId
-    -> (PackageIdentifierP, ModuleNameP)
-    -> m ()
-markModuleHasDocs snapshotId (PackageIdentifierP pname ver, modName) =
-  return () -- TODO: implement
+    -> PackageIdentifierP
+    -> Maybe SnapshotPackageId
+    -- ^ If we know ahead of time the SnapshotPackageId it will speed up a great deal if don't have
+    -- to look it up.
+    -> ModuleNameP
+    -> m (Maybe SnapshotPackageId)
+markModuleHasDocs snapshotId pid mSnapshotPackageId modName =
+    run $
+    maybe (getSnapshotPackageId snapshotId pid) (pure . Just) mSnapshotPackageId >>= \case
+        Just snapshotPackageId -> do
+            getBy (UniqueModule modName) >>= \case
+                Just (Entity modNameId _) ->
+                    updateWhere
+                        [ SnapshotPackageModuleSnapshotPackage ==. snapshotPackageId
+                        , SnapshotPackageModuleModule ==. modNameId
+                        ]
+                        [SnapshotPackageModuleHasDocs =. True]
+                Nothing -> pure ()
+            return $ Just snapshotPackageId
+        Nothing -> return Nothing
+
+-- -- Using rawSql genrates b roken syntax:
+-- -- [Debug#SQL] UPDATE snapshot_package_module SET has_docs = true FROM module WHERE module.id = snapshot_package_module.module AND module.name = ? AND snapshot_package_module.snapshot_package = ?"snapshot_package_module"."id", "snapshot_package_module"."snapshot_package", "snapshot_package_module"."module", "snapshot_package_module"."has_docs"; [PersistText "Data.BoundingBox.B1",PersistInt64 28]
+-- markModuleHasDocs snapshotId pid mSnapshotPackageId modName =
+--     run $
+--     maybe (getSnapshotPackageId snapshotId pid) (pure . Just) mSnapshotPackageId >>= \case
+--         Just snapshotPackageId -> do
+--             [] :: [Entity SnapshotPackageModule] <-
+--                 rawSql
+--                     "UPDATE snapshot_package_module \
+--                     \SET has_docs = true \
+--                     \FROM module \
+--                     \WHERE module.id = snapshot_package_module.module \
+--                     \AND module.name = ? \
+--                     \AND snapshot_package_module.snapshot_package = ?"
+--                     [toPersistValue modName, toPersistValue snapshotPackageId]
+--             return $ Just snapshotPackageId
+--         Nothing -> return Nothing
+
+-- -- Using esqueleto: generates broken syntax:
+-- -- [Debug#SQL] UPDATE "snapshot_package_module", "module"
+-- -- SET "has_docs" = ?
+-- -- WHERE ("snapshot_package_module"."module" = "module"."id") AND (("snapshot_package_module"."snapshot_package" = ?) AND ("module"."name" = ?))
+-- -- ; [PersistBool True,PersistInt64 28,PersistText "Data.BoundingBox.B1"]
+
+-- markModuleHasDocs snapshotId pid mSnapshotPackageId modName =
+--     run $
+--     maybe (getSnapshotPackageId snapshotId pid) (pure . Just) mSnapshotPackageId >>= \case
+--         Just snapshotPackageId -> do
+--             E.update $ \spm -> do
+--                 E.set spm [SnapshotPackageModuleHasDocs E.=. E.val True]
+--                 E.from $ \m ->
+--                     E.where_
+--                         ((spm E.^. SnapshotPackageModuleModule E.==. m E.^. ModuleId) E.&&.
+--                          (spm E.^. SnapshotPackageModuleSnapshotPackage E.==.
+--                           E.val snapshotPackageId) E.&&.
+--                          (m E.^. ModuleName E.==. E.val modName))
+--             return $ Just snapshotPackageId
+--         Nothing -> return Nothing
+
 
 
 getPantryHackageCabal
@@ -504,11 +606,11 @@ getHackageCabal ::
     => PackageNameP
     -> VersionP
     -> Maybe Revision
-    -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId))
+    -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId, Maybe TreeId))
 getHackageCabal pname ver mrev =
-    fmap (bimap unSingle unSingle) . listToMaybe <$>
+    fmap (\(Single hid, Single bid, Single mtid) -> (hid, bid, mtid)) . listToMaybe <$>
     rawSql
-        "SELECT hackage_cabal.id, hackage_cabal.cabal \
+        "SELECT hackage_cabal.id, hackage_cabal.cabal, hackage_cabal.tree \
          \FROM hackage_cabal, package_name, version \
          \WHERE hackage_cabal.name = package_name.id \
          \AND hackage_cabal.version = version.id \
@@ -525,7 +627,7 @@ toHackageCabalInfo ::
 toHackageCabalInfo pname (Single cid, Single bid, Single version, Single rev) =
     HackageCabalInfo
         { hciCabalId = cid
-        , hciBlobId = bid
+        , hciCabalBlobId = bid
         , hciPackageName = pname
         , hciVersion = version
         , hciRevision = toRevMaybe rev
@@ -551,9 +653,9 @@ getVersionForSnapshot sname pname =
     fmap (toHackageCabalInfo pname) . listToMaybe <$>
     run (rawSql
              "SELECT hackage_cabal.id, hackage_cabal.cabal, version.version, hackage_cabal.revision \
-             \FROM snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
-             \WHERE snapshot_hackage_package.snapshot = snapshot.id \
-             \AND snapshot_hackage_package.cabal = hackage_cabal.id \
+             \FROM snapshot, snapshot_package, hackage_cabal, package_name, version \
+             \WHERE snapshot_package.snapshot = snapshot.id \
+             \AND snapshot_package.hackage_cabal = hackage_cabal.id \
              \AND snapshot.name = ? \
              \AND package_name.name = ? \
              \AND hackage_cabal.name = package_name.id \
@@ -568,16 +670,26 @@ getSnapshotLatestVersion pname = do
     snaps <- getSnapshotsForPackage pname (Just 1)
     return $ listToMaybe [(s, hci) | (s, _, hci) <- snaps]
 
-getPackageInfo :: GetStackageDatabase env m =>
-  HackageCabalInfo -> Bool -> m (PackageInfo, [ModuleNameP])
-getPackageInfo hci needModules =
+getPackageInfo ::
+       GetStackageDatabase env m => HackageCabalInfo -> Maybe SnapName -> m (PackageInfo, [ModuleNameP])
+getPackageInfo hci mSnapName =
     run $ do
-        blob <- loadBlobById (hciBlobId hci)
-        mods <-
-            if needModules
-                then getPackageModules (hciCabalId hci) True
-                else return []
-        -- In theory parseCabalBlob can throw an error, which can depend on a Cabal version
+        let pid = PackageIdentifierP (hciPackageName hci) (hciVersion hci)
+        blob <- loadBlobById (hciCabalBlobId hci)
+        mods -- TODO: simplify retrieval of modules
+             <-
+            case mSnapName of
+                Nothing -> return []
+                Just snapName ->
+                    getBy (UniqueSnapshot snapName) >>= \case
+                        Just (Entity snapshotId _) ->
+                            getSnapshotPackageId snapshotId pid >>= \case
+                                Just snapshotPackageId ->
+                                    getSnapshotPackageModules snapshotPackageId True
+                                Nothing -> return []
+                        Nothing -> return []
+        -- In theory parseCabalBlob can throw an error, but considering all cabal files go through
+        -- pantry when imported they all should be error free.
         return (toPackageInfo $ parseCabalBlob blob, mods)
 
 getLatests :: GetStackageDatabase env m => PackageNameP -> m [LatestInfo]
@@ -598,10 +710,10 @@ getLatestLts :: (MonadIO m) => PackageNameP -> ReaderT SqlBackend m (Maybe Lates
 getLatestLts =
     getLatestHelper
         "SELECT snapshot.name, version.version, hackage_cabal.revision \
-        \FROM lts, snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
+        \FROM lts, snapshot, snapshot_package, hackage_cabal, package_name, version \
         \WHERE snapshot.id = lts.snap \
-        \AND snapshot.id = snapshot_hackage_package.snapshot \
-        \AND hackage_cabal.id = snapshot_hackage_package.cabal \
+        \AND snapshot.id = snapshot_package.snapshot \
+        \AND hackage_cabal.id = snapshot_package.hackage_cabal \
         \AND hackage_cabal.name = package_name.id \
         \AND hackage_cabal.version = version.id \
         \AND package_name.name = ? \
@@ -611,10 +723,10 @@ getLatestNightly :: (MonadIO m) => PackageNameP -> ReaderT SqlBackend m (Maybe L
 getLatestNightly =
     getLatestHelper
         "SELECT snapshot.name, version.version, hackage_cabal.revision \
-        \FROM nightly, snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
+        \FROM nightly, snapshot, snapshot_package, hackage_cabal, package_name, version \
         \WHERE snapshot.id = nightly.snap \
-        \AND snapshot.id = snapshot_hackage_package.snapshot \
-        \AND snapshot_hackage_package.cabal = hackage_cabal.id \
+        \AND snapshot.id = snapshot_package.snapshot \
+        \AND snapshot_package.hackage_cabal = hackage_cabal.id \
         \AND hackage_cabal.name = package_name.id \
         \AND hackage_cabal.version = version.id \
         \AND package_name.name = ? \
@@ -624,26 +736,26 @@ mkLimitHelper :: Maybe Int -> (Text, [PersistValue])
 mkLimitHelper = maybe ("", []) ((,) " LIMIT ?" . pure . toPersistValue)
 
 
-getForwardDeps ::
+getForwardHackageDeps ::
        GetStackageDatabase env m
     => SnapName
     -> HackageCabalId
     -> Maybe Int
     -> m [(PackageVersionRev, Text)]
-getForwardDeps snapName hackageCabalId mlimit =
+getForwardHackageDeps snapName hackageCabalId mlimit =
     run $
     map (\(Single pname, Single ver, Single rev, Single range) ->
              (PackageVersionRev pname (toVersionRev ver rev), range)) <$>
     rawSql
         ("SELECT package_name.name, version.version, hc_uses.revision, hackage_dep.range \
          \FROM hackage_dep, package_name, version, hackage_cabal hc_uses, \
-              \snapshot_hackage_package, snapshot \
+              \snapshot_package, snapshot \
          \WHERE hackage_dep.user = ? \
          \AND hackage_dep.uses = hc_uses.name \
          \AND hc_uses.version = version.id \
          \AND hc_uses.name = package_name.id \
-         \AND snapshot_hackage_package.cabal = hc_uses.id \
-         \AND snapshot_hackage_package.snapshot = snapshot.id \
+         \AND snapshot_package.hackage_cabal = hc_uses.id \
+         \AND snapshot_package.snapshot = snapshot.id \
          \AND snapshot.name=? \
          \ORDER BY package_name.name" <>
           mlimitSql)
@@ -651,13 +763,23 @@ getForwardDeps snapName hackageCabalId mlimit =
   where
     (mlimitSql, mlimitValue) = mkLimitHelper mlimit
 
-getForwardDepsCount :: MonadIO m => HackageCabalId -> ReaderT SqlBackend m Int
-getForwardDepsCount hackageCabalId = count [HackageDepUser ==. hackageCabalId]
 
-getDepsCount :: GetStackageDatabase env m => SnapName -> HackageCabalId -> m (Int, Int)
-getDepsCount snapName hackageCabalId =
+getForwardHackageDepsCount :: MonadIO m => HackageCabalId -> ReaderT SqlBackend m Int
+getForwardHackageDepsCount hackageCabalId = count [HackageDepUser ==. hackageCabalId]
+
+-- getForwardDepsCount :: MonadIO m => TreeId -> ReaderT SqlBackend m Int
+-- getForwardDepsCount treeId = count [DepUser ==. treeId]
+
+-- getDepsCount :: GetStackageDatabase env m => SnapName -> TreeId -> m (Int, Int)
+-- getDepsCount snapName treeId =
+--     run $
+--     (,) <$> getForwardDepsCount treeId <*> getReverseDepsCount snapName treeId
+
+getHackageDepsCount :: GetStackageDatabase env m => SnapName -> HackageCabalId -> m (Int, Int)
+getHackageDepsCount snapName hackageCabalId =
     run $
-    (,) <$> getForwardDepsCount hackageCabalId <*> getReverseDepsCount snapName hackageCabalId
+    (,) <$> getForwardHackageDepsCount hackageCabalId <*>
+    getReverseHackageDepsCount snapName hackageCabalId
 
 toRevMaybe :: Revision -> Maybe Revision
 toRevMaybe rev = guard (rev /= Revision 0) >> Just rev
@@ -665,27 +787,27 @@ toRevMaybe rev = guard (rev /= Revision 0) >> Just rev
 toVersionRev :: VersionP -> Revision -> VersionRev
 toVersionRev v = VersionRev v . toRevMaybe
 
-getReverseDeps ::
+getReverseHackageDeps ::
        GetStackageDatabase env m
     => SnapName
     -> HackageCabalId
     -> Maybe Int -- ^ Optionally limit number of dependencies
     -> m [(PackageVersionRev, Text)]
-getReverseDeps snapName hackageCabalId mlimit =
+getReverseHackageDeps snapName hackageCabalId mlimit =
     run $
     map (\(Single pname, Single ver, Single rev, Single range) ->
              (PackageVersionRev pname (toVersionRev ver rev), range)) <$>
     rawSql
         ("SELECT package_name.name, version.version, hc_user.revision, hackage_dep.range \
-         \FROM hackage_dep, package_name, version, snapshot, snapshot_hackage_package, \
+         \FROM hackage_dep, package_name, version, snapshot, snapshot_package, \
                \hackage_cabal hc_user, hackage_cabal hc_uses \
          \WHERE hc_uses.name = hackage_dep.uses \
          \AND hc_uses.id = ? \
          \AND hc_user.version = version.id \
          \AND hc_user.name = package_name.id \
          \AND hc_user.id = hackage_dep.user \
-         \AND hc_user.id = snapshot_hackage_package.cabal \
-         \AND snapshot_hackage_package.snapshot = snapshot.id \
+         \AND hc_user.id = snapshot_package.hackage_cabal \
+         \AND snapshot_package.snapshot = snapshot.id \
          \AND snapshot.name = ? \
          \ORDER BY package_name.name" <>
          mlimitSql)
@@ -693,18 +815,18 @@ getReverseDeps snapName hackageCabalId mlimit =
   where
     (mlimitSql, mlimitValue) = mkLimitHelper mlimit
 
-getReverseDepsCount :: MonadIO m => SnapName -> HackageCabalId -> ReaderT SqlBackend m Int
-getReverseDepsCount snapName hackageCabalId =
+getReverseHackageDepsCount :: MonadIO m => SnapName -> HackageCabalId -> ReaderT SqlBackend m Int
+getReverseHackageDepsCount snapName hackageCabalId =
     maybe 0 unSingle . listToMaybe <$>
     rawSql
         "SELECT COUNT(hackage_dep.user) \
-        \FROM hackage_dep, snapshot_hackage_package, snapshot, \
+        \FROM hackage_dep, snapshot_package, snapshot, \
              \hackage_cabal hc_user, hackage_cabal hc_uses \
         \WHERE hc_uses.name = hackage_dep.uses \
         \AND hc_uses.id = ? \
         \AND hc_user.id = hackage_dep.user \
-        \AND hc_user.id = snapshot_hackage_package.cabal \
-        \AND snapshot_hackage_package.snapshot = snapshot.id \
+        \AND hc_user.id = snapshot_package.hackage_cabal \
+        \AND snapshot_package.snapshot = snapshot.id \
         \AND snapshot.name = ?"
         [toPersistValue hackageCabalId, toPersistValue snapName]
 
@@ -724,9 +846,9 @@ getSnapshotsForPackage pname mlimit =
                      \hackage_cabal.cabal, \
                      \version.version, \
                      \hackage_cabal.revision \
-             \FROM snapshot, snapshot_hackage_package, hackage_cabal, package_name, version \
-             \WHERE snapshot_hackage_package.cabal = hackage_cabal.id \
-             \AND snapshot_hackage_package.snapshot = snapshot.id \
+             \FROM snapshot, snapshot_package, hackage_cabal, package_name, version \
+             \WHERE snapshot_package.hackage_cabal = hackage_cabal.id \
+             \AND snapshot_package.snapshot = snapshot.id \
              \AND package_name.name = ? \
              \AND hackage_cabal.name = package_name.id \
              \AND hackage_cabal.version = version.id \
@@ -734,7 +856,7 @@ getSnapshotsForPackage pname mlimit =
               mlimitQ)
              (toPersistValue pname : mlimitVal))
   where
-    (mlimitQ, mlimitVal) = maybe ("", []) ((,) " LIMIT ?" . pure . toPersistValue) mlimit
+    (mlimitQ, mlimitVal) = mkLimitHelper mlimit
 
 
 -- | Count snapshots that belong to a specific SnapshotBranch
