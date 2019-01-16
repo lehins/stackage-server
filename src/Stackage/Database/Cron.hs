@@ -1,71 +1,77 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE CPP                 #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections       #-}
 module Stackage.Database.Cron
     ( stackageServerCron
     , newHoogleLocker
     , singleRun
     ) where
 
-import qualified Codec.Archive.Tar             as Tar
+import qualified Codec.Archive.Tar               as Tar
 import           Conduit
-import           Control.Lens                  ((.~))
+import           Control.Lens                    ((.~))
+import qualified Control.Monad.Trans.AWS         as AWS (paginate)
 import           Control.SingleRun
-import qualified Control.Monad.Trans.AWS as AWS (paginate)
-import qualified Data.ByteString.Char8         as BS8
-import qualified Data.ByteString.Lazy          as LBS
-import qualified Data.ByteString.Lazy.Char8    as LBS8
-import qualified Data.Conduit.Binary           as CB
-import           Data.Conduit.Zlib             (WindowBits (WindowBits),
-                                                compress, ungzip)
-import           Data.Streaming.Network        (bindPortTCP)
-import Database.Persist
-import Database.Persist.Postgresql
+import qualified Data.ByteString.Char8           as BS8
+import qualified Data.ByteString.Lazy            as LBS
+import qualified Data.ByteString.Lazy.Char8      as LBS8
+import qualified Data.Conduit.Binary             as CB
+import           Data.Conduit.Zlib               (WindowBits (WindowBits),
+                                                  compress, ungzip)
+import           Data.Streaming.Network          (bindPortTCP)
+import           Database.Persist
+import           Database.Persist.Postgresql
 import           Distribution.PackageDescription (GenericPackageDescription)
 import qualified Hoogle
-import           Network.AWS                   hiding (Request, Response)
-import           Network.AWS.Data.Body         (toBody)
-import           Network.AWS.Data.Log          (build)
-import           Network.AWS.Data.Text         (toText)
+import           Network.AWS                     hiding (Request, Response)
+import           Network.AWS.Data.Body           (toBody)
+import           Network.AWS.Data.Log            (build)
+import           Network.AWS.Data.Text           (toText)
 import           Network.AWS.Pager
 import           Network.AWS.S3
 import           Network.HTTP.Client
-import           Network.HTTP.Client.Conduit   (bodyReaderSource)
-import           Network.HTTP.Simple           (getResponseBody, httpJSONEither,
-                                                parseRequest)
-import           Network.HTTP.Types            (status200)
-import           Pantry                        (defaultHackageSecurityConfig)
-import           Pantry.Types                  (HpackExecutable (HpackBundled),
-                                                PantryConfig (..))
-import           Path                          (parseAbsDir, toFilePath)
+import           Network.HTTP.Client.Conduit     (bodyReaderSource)
+import           Network.HTTP.Simple             (getResponseBody,
+                                                  httpJSONEither, parseRequest)
+import           Network.HTTP.Types              (status200)
+import           Pantry                          (defaultHackageSecurityConfig)
+import           Pantry.Hackage                  (DidUpdateOccur (..),
+                                                  forceUpdateHackageIndex,
+                                                  getHackageTarballOnGPD)
+import           Pantry.Storage                  (HackageCabalId, TreeId,
+                                                  getTreeForKey, loadBlobById,
+                                                  treeCabal)
+import           Pantry.Types                    (HpackExecutable (HpackBundled),
+                                                  PantryConfig (..))
+import           Path                            (parseAbsDir, toFilePath)
 import           RIO
 import           RIO.Directory
 import           RIO.FilePath
-import qualified RIO.Map                       as Map
-import qualified RIO.Set                       as Set
-import           RIO.Process                   (mkDefaultProcessContext)
-import qualified RIO.Text                      as T
+import qualified RIO.Map                         as Map
+import           RIO.Process                     (mkDefaultProcessContext)
+import qualified RIO.Set                         as Set
+import qualified RIO.Text                        as T
 import           RIO.Time
-import           Stackage.Database
-import           Stackage.Database.Types
 import           Stackage.Database.Github
 import           Stackage.Database.PackageInfo
-import           System.Environment            (getEnv)
+import           Stackage.Database.Query
+import           Stackage.Database.Schema
+import           Stackage.Database.Types
+import           System.Environment              (getEnv)
 import           Types
-import           UnliftIO.Async                (pooledMapConcurrently)
-import           UnliftIO.Concurrent           (getNumCapabilities)
-import           Web.PathPieces                (fromPathPiece, toPathPiece)
-import Pantry.Hackage (DidUpdateOccur(..), forceUpdateHackageIndex, getHackageTarballOnGPD)
-import Pantry.Storage (HackageCabalId, withStorage, loadBlobById, TreeId, getTreeForKey, treeCabal)
+import           UnliftIO.Async                  (pooledMapConcurrently)
+import           UnliftIO.Concurrent             (getNumCapabilities)
+import           Web.PathPieces                  (fromPathPiece, toPathPiece)
 
-import Pantry.Types
-    ( CabalFileInfo(..)
-    , HasPantryConfig(..)
-    , PackageIdentifierRevision(..)
-    , packageTreeKey
-    )
-import Data.Yaml (decodeFileEither)
+import           Data.Yaml                       (decodeFileEither)
+import           Pantry.Types                    (CabalFileInfo (..),
+                                                  HasPantryConfig (..),
+                                                  PackageIdentifierRevision (..),
+                                                  packageTreeKey)
 
 
 
@@ -152,8 +158,8 @@ stackageServerCron forceUpdate = do
     -- Hacky approach instead of PID files
     _ <- liftIO $ catchIO (bindPortTCP 17834 "127.0.0.1") $ \_ ->
         error $ "cabal loader process already running, exiting"
-    let connectionCount = 2
-    --connectionCount <- getNumCapabilities
+    --let connectionCount = 2
+    connectionCount <- min 4 <$> getNumCapabilities
     storage <- initStorage connectionCount
     lo <- logOptionsHandle stdout True
     stackageRootDir <- getAppUserDataDirectory "stackage"
@@ -193,175 +199,105 @@ runStackageUpdate = do
     case didUpdate of
         UpdateOccurred -> do
             logInfo "Updated hackage index. Getting deprecated info now"
-            getHackageDeprecations >>= withStorage . mapM_ addDeprecated
+            getHackageDeprecations >>= run . mapM_ addDeprecated
         NoUpdateOccurred -> do
             logInfo "No new packages in hackage index"
-    corePackages <- getCorePackages
+    corePackageGetters <- makeCorePackageGetters
     finalAction <-
         runConduitRes $
         sourceSnapshots .|
-        foldMC (createOrUpdateSnapshot forceFullUpdate corePackages) (pure ())
+        foldMC (createOrUpdateSnapshot forceFullUpdate corePackageGetters) (pure ())
     runResourceT finalAction
-    withStorage $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
+    run $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
 
 
 
-getCorePackages ::
-       RIO StackageCron (Map Compiler [CorePackageGetter])
-getCorePackages = do
+makeCorePackageGetters ::
+       RIO StackageCron (Map CompilerP [CorePackageGetter])
+makeCorePackageGetters = do
     rootDir <- scStackageRoot <$> ask
     contentDir <- getStackageContentDir rootDir
     liftIO (decodeFileEither (contentDir </> "stack" </> "global-hints.yaml")) >>= \case
-        Right (hints :: Map Compiler (Map PackageNameP VersionP)) ->
-            traverse (fmap Map.elems . Map.traverseMaybeWithKey makePackageInfoGetter) hints
+        Right (hints :: Map CompilerP (Map PackageNameP VersionP)) ->
+            Map.traverseWithKey
+                (\compiler ->
+                     fmap Map.elems . Map.traverseMaybeWithKey (makeCorePackageGetter compiler))
+                hints
         Left exc -> do
             logError $
                 "Error parsing 'global-hints.yaml' file: " <> fromString (displayException exc)
             return mempty
-  where
-    -- | Core package info rarely changes between the snapshots, therefore it would be wasteful to
-    -- load, parse and update all packages from gloabl-hints for each snapshot, instead we produce
-    -- a memoized version that will do it once initiall and then return information aboat a
-    -- package on subsequent invocations.
-    makePackageInfoGetter pname ver = do
-        let pid = PackageIdentifierP pname ver
-            pir =
-                PackageIdentifierRevision
-                    (unPackageNameP pname)
-                    (unVersionP ver)
-                    (CFIRevision (Revision 0))
-            getTreeId pkg =
-                withStorage $ do
-                    mTree <- getTreeForKey $ packageTreeKey pkg
-                    case mTree of
-                        Nothing ->
-                            error $
-                            "Impossible! Full tree must have been loaded by now for: " ++ show pid
-                        Just (Entity key _) -> pure key
-        -- TODO: Should maybe latest revision be used instead of rev:0 (i.e. Nothing)
-        withStorage (getHackageCabal pname ver Nothing) >>= \case
-            Nothing -> do
-                logError $
-                    "Core package from global-hints: '" <> display pid <>
-                    "' was not found in pantry."
-                pure Nothing
-            Just (hackageCabalId, blobId, mtreeId) -> do
-                pkgInfoRef <- newIORef Nothing
-                let pid = PackageIdentifierP pname ver
-                    onGPD treeId gpd = do
-                        writeIORef pkgInfoRef $ Just (treeId, Just hackageCabalId, pid, gpd)
-                    getMemoPackageInfo =
-                        readIORef pkgInfoRef >>= \case
-                            Just pkgInfo -> return pkgInfo
-                            Nothing -> do
-                                logSticky $ "Loading core package: " <> display pid
-                                pkg <- getHackageTarballOnGPD onGPD pir Nothing
-                                -- If full package is already in pantry onGPD will not get invoked
-                                -- therefore we might need to parse cabal file ourselves below
-                                readIORef pkgInfoRef >>= \case
-                                    Nothing -> do
-                                        treeId <- maybe (getTreeId pkg) return mtreeId
-                                        gpd <- parseCabalBlob <$> withStorage (loadBlobById blobId)
-                                        let pkgInfo = (treeId, Just hackageCabalId, pid, gpd)
-                                        writeIORef pkgInfoRef $ Just pkgInfo
-                                        pure pkgInfo
-                                    Just pkgInfo -> pure pkgInfo
-                pure $ Just getMemoPackageInfo
 
-addPantryPackage :: Bool -> SnapshotId -> Bool -> PantryPackage -> RIO StackageCron Bool
-addPantryPackage forceUpdate snapKey isHidden (PantryPackage pc treeKey) =
-    withStorage (getPantryHackageCabal pc) >>= \case
+-- | Core package info rarely changes between the snapshots, therefore it would be wasteful to
+-- load, parse and update all packages from gloabl-hints for each snapshot, instead we produce
+-- a memoized version that will do it once initiall and then return information aboat a
+-- package on subsequent invocations.
+makeCorePackageGetter ::
+       CompilerP -> PackageNameP -> VersionP -> RIO StackageCron (Maybe CorePackageGetter)
+makeCorePackageGetter _compiler pname ver = do
+    run (getHackageCabalRev0 pid) >>= \case
         Nothing -> do
             logError $
-                "Couldn't find a valid tree for " <> display pid <>
-                " in pantry corresponding to: " <>
-                display treeKey
-             -- TODO: load non-hackage package here instead of an error
-            return False
-        Just (hackageCabalId, blobId) -> do
-            didUpdateRef <- newIORef False
+                "Core package from global-hints: '" <> display pid <> "' was not found in pantry."
+            -- TODO: possibly try getting from gitlab, eg:
+            --       https://gitlab.haskell.org/ghc/ghc/raw/ghc-7.8.4-release/
+            --             libraries/bin-package-db/bin-package-db.cabal
+            pure Nothing
+        Just (hackageCabalId, blobId, _) -> do
+            pkgInfoRef <- newIORef Nothing
             let onGPD treeId gpd = do
-                    addSnapshotPackage False snapKey treeId (Just hackageCabalId) isHidden pid gpd
-                    writeIORef didUpdateRef True
-                ensurePackageAdded =
-                    getTreeForKey treeKey >>= \case
-                        Nothing -> error "Should have been loaded by now"
-                        Just (Entity treeId _) -> do
-                            let isNotLoaded =
-                                    isNothing <$> getBy (UniqueSnapshotPackage snapKey treeId)
-                            whenM ((||) <$> pure forceUpdate <*> isNotLoaded) $ do
-                                cabalBlob <- loadBlobById blobId
-                                onGPD treeId $ parseCabalBlob cabalBlob
-            _ <-
-                getHackageTarballOnGPD
-                    (\treeId -> withStorage . onGPD treeId)
-                    (toPackageIdentifierRevision pc)
-                    (Just treeKey)
-            -- when package is already in pantry getHackageTarballOnGPD will not invoke onGPD
-            -- we need to do it manually.
-            unlessM (readIORef didUpdateRef) $ withStorage ensurePackageAdded
-            return True
+                    mTree <- run $ getEntity treeId
+                    writeIORef pkgInfoRef $ Just (mTree, Just hackageCabalId, pid, gpd)
+                getMemoPackageInfo =
+                    readIORef pkgInfoRef >>= \case
+                        Just pkgInfo -> return pkgInfo
+                        Nothing -> do
+                            logSticky $ "Loading core package: " <> display pid
+                            pkg <- getHackageTarballOnGPD onGPD pir Nothing
+                            -- If full package is already in pantry onGPD will not get invoked
+                            -- therefore we might need to parse cabal file ourselves below
+                            readIORef pkgInfoRef >>= \case
+                                Nothing -> do
+                                    gpd <- parseCabalBlob <$> run (loadBlobById blobId)
+                                    mTree <- run $ getTreeForKey $ packageTreeKey pkg
+                                    let pkgInfo = (mTree, Just hackageCabalId, pid, gpd)
+                                    writeIORef pkgInfoRef $ Just pkgInfo
+                                    pure pkgInfo
+                                Just pkgInfo -> pure pkgInfo
+            pure $ Just getMemoPackageInfo
+  where
+    pid = PackageIdentifierP pname ver
+    pir =
+        PackageIdentifierRevision (unPackageNameP pname) (unVersionP ver) (CFIRevision (Revision 0))
+
+
+-- TODO: for now it is only from hackage, PantryPackage needs an update
+addPantryPackage ::
+       SnapshotId -> CompilerP -> Bool -> Map FlagNameP Bool -> PantryPackage -> RIO StackageCron Bool
+addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
+    hasAddedPackageRef <- newIORef False
+    let onGPD mtid mgpd = do
+            getTreeForKey treeKey >>= \case
+                mTree@(Just (Entity treeId Tree {treeName, treeVersion, treeCabal}))
+                    | maybe True (== treeId) mtid -> do
+                        mhcid <-
+                            fmap entityKey <$>
+                            getBy (UniqueHackage treeName treeVersion (Revision 0))
+                        gpd <- maybe (parseCabalBlob <$> loadBlobById treeCabal) return mgpd
+                        addSnapshotPackage sid compiler Hackage mTree mhcid isHidden flags pid gpd
+                        writeIORef hasAddedPackageRef True
+                _ ->
+                    lift $ logError $ "Unexpected problem loading the tree for " <> display pid
+    _pkg <-
+        getHackageTarballOnGPD
+            (\treeId gpd -> run $ onGPD (Just treeId) (Just gpd))
+            (toPackageIdentifierRevision pc)
+            (Just treeKey)
+    unlessM (readIORef hasAddedPackageRef) $ run (onGPD Nothing Nothing)
+    readIORef hasAddedPackageRef
   where
     pid = PackageIdentifierP (pcPackageName pc) (pcPackageVersion pc)
 
--- TODO: Optimize, whenever package is already in one snapshot only create the modules and new
--- SnapshotPackage
-addSnapshotPackage ::
-       (MonadIO m, MonadReader env m, HasLogFunc env)
-    => Bool
-    -> SnapshotId
-    -> TreeId
-    -> Maybe HackageCabalId
-    -> Bool
-    -> PackageIdentifierP
-    -> GenericPackageDescription
-    -> ReaderT SqlBackend m ()
-addSnapshotPackage isCore snapKey treeId mhackageCabalId isHidden pid gpd = do
-    let synopsis = piSynopsis $ toPackageInfo gpd
-        readme = ""
-        changelog = ""
-    eKeyEntity <-
-        insertBy $
-        SnapshotPackage snapKey treeId mhackageCabalId isCore synopsis readme changelog isHidden
-    forM_ mhackageCabalId $ \hackageCabalId ->
-        insertHackageDeps pid hackageCabalId (extractDependencies gpd)
-    let snapshotPackageId = either entityKey id eKeyEntity
-    insertSnapshotPackageModules snapshotPackageId (getModuleNames gpd)
-
--- -- | Download a list of available .html files from S3 bucket for a particular resolver and record
--- -- in the database which modules have documentation available for them.
--- checkForDocs :: SnapshotId -> SnapName -> ResourceT (RIO StackageCron) ()
--- checkForDocs snapshotId snapName = do
---     (_, notFoundSet) <-
---         runConduit $
---         --sourcePagerAWS req (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
---         AWS.paginate req .| concatMapC (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
---         concatMapC (T.stripSuffix ".html") .|
---         concatMapC (T.stripPrefix prefix) .|
---         concatMapC pathToPackageModule .|
---         foldMC markModules (Map.empty, Set.empty)
---     forM_ notFoundSet $ \pid ->
---         lift $
---         logError $
---         "Documentation available for package '" <> display pid <>
---         "' but was not found in this snapshot: " <>
---         display snapName
---   where
---     prefix = textDisplay snapName <> "/"
---     req = listObjectsV2 (BucketName haddockBucketName) & lovPrefix .~ Just prefix
---     -- It takes too long for each package to be looked up for each module in the db, so we cache
---     -- the ids for snapshot packages as well as record all packages that have documentation
---     -- available, but not found in the snapshot.
---     markModules (snapshotPackageIds, notFoundSet) (pid, modName) = do
---         let mSnapshotPackageId = Map.lookup pid snapshotPackageIds
---         mFound <- lift $ markModuleHasDocs snapshotId pid mSnapshotPackageId modName
---         pure $
---             case mFound of
---                 Nothing -> (snapshotPackageIds, Set.insert pid notFoundSet)
---                 Just snapshotPackageId
---                     | Nothing <- mSnapshotPackageId ->
---                         (Map.insert pid snapshotPackageId snapshotPackageIds, notFoundSet)
---                 _ -> (snapshotPackageIds, notFoundSet)
 
 
 
@@ -370,7 +306,6 @@ addSnapshotPackage isCore snapKey treeId mhackageCabalId isHidden pid gpd = do
 checkForDocs :: SnapshotId -> SnapName -> ResourceT (RIO StackageCron) ()
 checkForDocs snapshotId snapName = do
     mods <- runConduit $
-        --sourcePagerAWS req (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
         AWS.paginate req .| concatMapC (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
         concatMapC (T.stripSuffix ".html") .|
         concatMapC (T.stripPrefix prefix) .|
@@ -391,7 +326,7 @@ checkForDocs snapshotId snapName = do
     -- available, but not found in the snapshot.
     markModules (snapshotPackageIds, notFoundSet) (pid, modName) = do
         let mSnapshotPackageId = Map.lookup pid snapshotPackageIds
-        mFound <- markModuleHasDocs snapshotId pid mSnapshotPackageId modName
+        mFound <- run $ markModuleHasDocs snapshotId pid mSnapshotPackageId modName
         pure $
             case mFound of
                 Nothing -> (snapshotPackageIds, Set.insert pid notFoundSet)
@@ -427,7 +362,7 @@ sourceSnapshots = do
                          in return $ Just snap {sfCreatedOn = createdOn}
                     Left exc -> do
                         logError $
-                            "Error parsing snapshot file: " <> fromString fp <>
+                            "Error parsing snapshot file: " <> fromString fp <> "\n" <>
                             fromString (displayException exc)
                         return Nothing
         eUpdatedOn <- lastGitFileUpdate gitDir fp
@@ -460,61 +395,76 @@ sourceSnapshots = do
 -- | Creates a new snapshot if it is not yet present in the database and decides further if update
 -- is necessary.
 decideOnSnapshotUpdate ::
-       Bool
+       Bool -- ^ When True, will trigger the update regardless of the updatedOn timestamp.
     -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
     -> RIO StackageCron (Maybe (SnapshotId, SnapshotFile))
 decideOnSnapshotUpdate forceUpdate (snapName, updatedOn, parseSnapshotFile) = do
+    let mkLogMsg rest = "Snapshot with name: " <> display snapName <> " " <> rest
     mKeySnapFile <-
-        withStorage (getBy (UniqueSnapshot snapName)) >>= \case
+        run (getBy (UniqueSnapshot snapName)) >>= \case
             Just (Entity _key snap)
                 | snapshotUpdatedOn snap == Just updatedOn && not forceUpdate -> do
-                    logInfo $
-                        "Snapshot with name: " <> display snapName <>
-                        " already exists and is up to date."
+                    logInfo $ mkLogMsg "already exists and is up to date."
                     return Nothing
             Just (Entity key snap)
                 | Nothing <- snapshotUpdatedOn snap -> do
-                    logWarn $
-                        "Snapshot with name: " <> display snapName <>
-                        " did not finish updating last time."
+                    logWarn $ mkLogMsg "did not finish updating last time."
                     fmap (Just key, ) <$> parseSnapshotFile
             Just (Entity key _snap) -> do
                 unless forceUpdate $
-                    logWarn $
-                    "Snapshot with name: " <> display snapName <>
-                    " was updated, applying new patch."
+                    logWarn $ mkLogMsg "was updated, applying new patch."
                 fmap (Just key, ) <$> parseSnapshotFile
             Nothing -> fmap (Nothing, ) <$> parseSnapshotFile
     -- Add new snapshot to the database, when necessary
-    withStorage $
-        case mKeySnapFile of
-            Just (Just snapKey, sf) -> return $ Just (snapKey, sf)
-            Just (Nothing, sf@SnapshotFile {sfName, sfCompiler, sfCreatedOn})
-                | Just createdOn <- sfCreatedOn ->
-                    fmap (, sf) <$> insertUnique (Snapshot sfName sfCompiler createdOn Nothing)
-            _ -> return Nothing
+    case mKeySnapFile of
+        Just (Just snapKey, sf) -> return $ Just (snapKey, sf)
+        Just (Nothing, sf@SnapshotFile {sfName, sfCompiler, sfCreatedOn})
+            | Just createdOn <- sfCreatedOn ->
+                fmap (, sf) <$> run (insertUnique (Snapshot sfName sfCompiler createdOn Nothing))
+        _ -> return Nothing
 
 type CorePackageGetter
-     = RIO StackageCron ( TreeId
+     = RIO StackageCron ( Maybe (Entity Tree)
                         , Maybe HackageCabalId
                         , PackageIdentifierP
                         , GenericPackageDescription)
 
-updateSnapshot
-  :: Bool
-     -> Map Compiler [CorePackageGetter]
-     -> SnapshotId
-     -> UTCTime
-     -> SnapshotFile
-     -> RIO StackageCron (ResourceT (RIO StackageCron) ())
-updateSnapshot forceUpdate corePackages snapKey updatedOn SnapshotFile {..} = do
-    insertSnapshotName snapKey sfName
-    case Map.lookup sfCompiler corePackages of
+-- | This is an optimized version of snapshoat loading which can load a snapshot and documentation
+-- info for previous snapshot at the same time. It will execute concurrently the loading of
+-- current snapshot as well as an action that was passed as an argument. At the end it will return
+-- an action that should be invoked in order to mark modules that have documentation available,
+-- which in turn can be passed as an argument to the next snapshot loader.
+createOrUpdateSnapshot ::
+       Bool
+    -> Map CompilerP [CorePackageGetter]
+    -> ResourceT (RIO StackageCron) ()
+    -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
+    -> ResourceT (RIO StackageCron) (ResourceT (RIO StackageCron) ())
+createOrUpdateSnapshot forceUpdate corePackageInfoGetters prevAction snapInfo = do
+    snd <$> concurrently prevAction (lift loadCurrentSnapshot)
+  where
+    (_, updatedOn, _) = snapInfo
+    loadCurrentSnapshot =
+        decideOnSnapshotUpdate forceUpdate snapInfo >>= \case
+            Nothing -> return $ pure ()
+            Just (snapshotId, snapshotFile) ->
+                updateSnapshot corePackageInfoGetters snapshotId updatedOn snapshotFile
+
+
+updateSnapshot ::
+       Map CompilerP [CorePackageGetter]
+    -> SnapshotId
+    -> UTCTime
+    -> SnapshotFile
+    -> RIO StackageCron (ResourceT (RIO StackageCron) ())
+updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
+    insertSnapshotName snapshotId sfName
+    case Map.lookup sfCompiler corePackageGetters of
         Nothing -> logError $ "Hints are not found for the compiler: " <> display sfCompiler
         Just compilerCorePackages ->
             forM_ compilerCorePackages $ \getCorePackageInfo -> do
-                (treeId, mhackageCabalId, pid, gpd) <- getCorePackageInfo
-                withStorage $ addSnapshotPackage True snapKey treeId mhackageCabalId False pid gpd
+                (mTree, mhcid, pid, gpd) <- getCorePackageInfo
+                run $ addSnapshotPackage snapshotId sfCompiler Core mTree mhcid False mempty pid gpd
     loadedPackageCountRef <- newIORef (0 :: Int)
     let totalPackages = length sfPackages
         progressReporter =
@@ -530,44 +480,30 @@ updateSnapshot forceUpdate corePackages snapKey updatedOn SnapshotFile {..} = do
         addPantryPackageWithReport pp = do
             let PantryCabal {pcPackageName} = ppPantryCabal pp
                 isHidden = fromMaybe False (Map.lookup pcPackageName sfHidden)
-            curSucc <- addPantryPackage forceUpdate snapKey isHidden pp
+                flags = fromMaybe Map.empty $ Map.lookup pcPackageName sfFlags
+            curSucc <- addPantryPackage snapshotId sfCompiler isHidden flags pp
             atomicModifyIORef' loadedPackageCountRef (\c -> (c + 1, ()))
             pure curSucc
     -- ensure we leave off one connection for doc loader
     connCount <- max 1 . subtract 1 . pcConnectionCount <$> view pantryConfigL
     ePantryUpdatesSucceeded <-
-        race progressReporter $ pooledMapConcurrentlyN connCount addPantryPackageWithReport sfPackages
+        race progressReporter $
+        pooledMapConcurrentlyN connCount addPantryPackageWithReport sfPackages
     logSticky $ "Loading snapshot '" <> display sfName <> "' is done. Next are the docs..."
     let pantryUpdateSucceeded = either (const False) and ePantryUpdatesSucceeded
     return $ do
-        checkForDocs snapKey sfName
-        if pantryUpdateSucceeded
+        checkForDocsSucceeded <-
+            tryAny (checkForDocs snapshotId sfName) >>= \case
+                Left exc -> do
+                    logError $ "Received exception while getting the docs: " <> displayShow exc
+                    return False
+                Right () -> return True
+        if pantryUpdateSucceeded && checkForDocsSucceeded
             then do
-                lift $ snapshotMarkUpdated snapKey updatedOn
+                lift $ snapshotMarkUpdated snapshotId updatedOn
                 logInfo $ "Created or updated snapshot '" <> display sfName <> "' successfully"
             else logError $ "There were errors while adding snapshot '" <> display sfName <> "'"
 
-
--- | This is an optimized version of snapshoat loading which can load a snapshot and documentation
--- info for previous snapshot at the same time. It will execute concurrently the loading of
--- current snapshot as well as an action that was passed as an argument. At the end it will return
--- an action that should be invoked in order to mark modules that have documentation available,
--- which in turn can be passed as an argument to the next snapshot loader.
-createOrUpdateSnapshot ::
-       Bool
-    -> Map Compiler [CorePackageGetter]
-    -> ResourceT (RIO StackageCron) ()
-    -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
-    -> ResourceT (RIO StackageCron) (ResourceT (RIO StackageCron) ())
-createOrUpdateSnapshot forceUpdate corePackageInfoGetters prevAction snapInfo = do
-    snd <$> concurrently prevAction (lift loadCurrentSnapshot)
-  where
-    (_, updatedOn, _) = snapInfo
-    loadCurrentSnapshot =
-        decideOnSnapshotUpdate forceUpdate snapInfo >>= \case
-            Nothing -> return $ pure ()
-            Just (snapshotId, snapshotFile) ->
-                updateSnapshot forceUpdate corePackageInfoGetters snapshotId updatedOn snapshotFile
 
 
 -- #if !DEVELOPMENT
@@ -725,46 +661,6 @@ createOrUpdateSnapshot forceUpdate corePackageInfoGetters prevAction snapInfo = 
 
 -- singleDB _ _ _ _ = return mempty
 
-
-------------------------------
--- AWS part of the cron job --
-------------------------------
-
--- -- | Send request to AWS and process the response with a handler. A separate
--- -- error handler will be invoked whenever an error occurs, which suppose to return
--- -- some sort of default value. Error is logged using `MonadLoggger`
--- sendAWS
---   :: (MonadReader env m,
---       MonadResource m,
---       HasLogFunc env, HasEnv env, AWSRequest a) =>
---      a -> (Error -> m b) -> (Rs a -> m b) -> m b
--- sendAWS req onErr onResp = do
---   env <- ask
---   eResp <- runAWS env $ trying _Error $ send req
---   case eResp of
---     Left err -> do
---       logError $ Utf8Builder (build err)
---       onErr err
---     Right resp -> onResp resp
-
-
--- -- | Recursively handle responses that support pagination returned by `sendAWS`.
--- pagerAWS
---   :: (AWSPager a, HasEnv env, HasLogFunc env, MonadReader env m, MonadResource m)
---   => a -> (Rs a -> m ()) -> m ()
--- pagerAWS req onResp = do
---   sendAWS req (const $ return ()) $ \resp -> do
---     onResp resp
---     case page req resp of
---       Just newReq -> pagerAWS newReq onResp
---       _           -> return ()
-
--- -- | Conduit style `pagerAWS`, produces elements from each page continuously
--- -- until there is no more pages avialable.
--- sourcePagerAWS
---   :: (AWSPager a, HasLogFunc env, HasEnv env, MonadReader env m, MonadResource m)
---   => a -> (Rs a -> [b]) -> ConduitT v b m ()
--- sourcePagerAWS req getPage = pagerAWS req (yieldMany . getPage)
 
 pathToPackageModule :: Text -> Maybe (PackageIdentifierP, ModuleNameP)
 pathToPackageModule txt =

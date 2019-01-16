@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 -- | Ensure that a function is only being run on a given input in one
 -- thread at a time. All threads trying to make the call at once

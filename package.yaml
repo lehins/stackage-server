@@ -96,34 +96,20 @@ dependencies:
 - pretty
 
 default-extensions:
-- TemplateHaskell
-- QuasiQuotes
 - OverloadedStrings
-- MultiParamTypeClasses
-- TypeFamilies
-- GADTs
-- GeneralizedNewtypeDeriving
-- FlexibleContexts
-- EmptyDataDecls
-- NoMonomorphismRestriction
-- DeriveDataTypeable
+# TODO: remove
 - ViewPatterns
-- TypeSynonymInstances
-- FlexibleInstances
-- RankNTypes
-- FunctionalDependencies
-- PatternGuards
-- StandaloneDeriving
-- UndecidableInstances
+- TemplateHaskell
 - RecordWildCards
-- ScopedTypeVariables
-- BangPatterns
-- TupleSections
-- DeriveGeneric
-- DeriveFunctor
-- DeriveFoldable
-- DeriveTraversable
 - LambdaCase
+- ScopedTypeVariables
+- FlexibleContexts
+- FlexibleInstances
+- TypeFamilies
+- DeriveGeneric
+- DeriveDataTypeable
+- MultiParamTypeClasses
+- QuasiQuotes
 
 library:
   source-dirs: src

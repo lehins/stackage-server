@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE RecordWildCards   #-}
@@ -5,37 +6,45 @@ module Stackage.Database.Types
     ( SnapName (..)
     , isLts
     , isNightly
-    , Compiler(..)
-    , displayCompiler
-    , parseCompiler
+    , CompilerP(..)
+    , FlagNameP(..)
     , StackageCron(..)
     , PantryCabal(..)
+    , GenericPackageDescription
     , toPackageIdentifierRevision
     , PantryPackage(..)
     , SnapshotFile(..)
     , HackageCabalInfo(..)
     , PackageListingInfo(..)
     , ModuleListingInfo(..)
+    , PackageNameP(..)
+    , VersionP(..)
+    , Revision(..)
+    , VersionRangeP(..)
+    , PackageIdentifierP(..)
+    , ModuleNameP(..)
+    , PackageOrigin(..)
     , LatestInfo(..)
     , Deprecation(..)
     , haddockBucketName
     ) where
 
 import           Data.Aeson
-import           Data.Bifunctor       (bimap)
 import qualified Data.Text            as T
 import           Data.Text.Read       (decimal)
-import qualified Data.Text.Read       as T (decimal)
-import           Database.Persist
-import           Database.Persist.Sql hiding (LogFunc)
-import           Network.AWS          (HasEnv(..), Env)
-import           Pantry.SHA256
-import           Pantry.Storage       (BlobId, TreeId, HackageCabalId)
-import           Pantry.Types
+import           Database.Persist     (PersistField(..), SqlType(SqlInt64))
+import           Database.Persist.Sql (PersistFieldSql(..))
+import           Network.AWS          (Env, HasEnv (..))
+import           Pantry.SHA256        (fromHexText)
+import           Pantry.Storage       (BlobId, HackageCabalId, TreeId)
+import           Pantry.Types         (BlobKey (..), CabalFileInfo (..),
+                                       FileSize (..), HasPantryConfig (..),
+                                       PackageIdentifierRevision (..),
+                                       PackageNameP (..), PantryConfig,
+                                       TreeKey (..), VersionP (..))
 import           RIO
 import           RIO.Process          (HasProcessContext (..), ProcessContext)
-import           RIO.Time
-import           Stackage.Types       (dtDisplay)
+import           RIO.Time             (Day)
 import           Text.Blaze           (ToMarkup (..))
 import           Types
 import           Web.PathPieces
@@ -70,22 +79,20 @@ instance PersistField SnapName where
 instance PersistFieldSql SnapName where
     sqlType = sqlType . fmap toPathPiece
 instance PathPiece SnapName where
-    toPathPiece = showSnapName
-
+    toPathPiece = textDisplay
     fromPathPiece = parseSnapName
 
 instance FromJSON SnapName where
     parseJSON = withText "SnapName" (maybe (fail "Can't parse snapshot name") pure . parseSnapName)
 
-showSnapName :: SnapName -> Text
-showSnapName (SNLts x y) = T.concat ["lts-", T.pack (show x), ".", T.pack (show y)]
-showSnapName (SNNightly d) = "nightly-" <> T.pack (show d)
-
 instance ToMarkup SnapName where
-    toMarkup = toMarkup . showSnapName
+    toMarkup = toMarkup . textDisplay
 
 instance Display SnapName where
-    display = display . showSnapName
+    display =
+        \case
+            (SNLts x y) -> mconcat ["lts-", displayShow x, ".", displayShow y]
+            (SNNightly d) -> "nightly-" <> displayShow d
 
 parseSnapName :: Text -> Maybe SnapName
 parseSnapName t0 = nightly <|> lts
@@ -121,48 +128,33 @@ instance HasPantryConfig StackageCron where
     pantryConfigL = lens scPantryConfig (\c f -> c {scPantryConfig = f})
 
 
-newtype Compiler =
-    CompilerGHC { ghcVersion :: Version }
-    deriving (Eq, Ord)
-
-instance Show Compiler where
-    show = displayCompiler
-
-instance FromJSONKey Compiler where
-    fromJSONKey = FromJSONKeyTextParser (either fail pure . parseCompiler)
-
-instance Display Compiler where
-    display = displayCompiler
-    textDisplay = displayCompiler
-instance ToJSON Compiler where
-    toJSON = String . displayCompiler
-instance FromJSON Compiler where
-    parseJSON = withText "Compiler" (either fail return .  parseCompiler)
-instance PersistField Compiler where
-    toPersistValue = PersistText . displayCompiler
-    fromPersistValue v = fromPersistValue v >>= mapLeft T.pack . parseCompiler
-instance PersistFieldSql Compiler where
-    sqlType _ = SqlString
-
-displayCompiler :: (Monoid a, IsString a) => Compiler -> a
-displayCompiler (CompilerGHC vghc) = "ghc-" <> dtDisplay vghc
-
-parseCompiler :: Text -> Either String Compiler
-parseCompiler txt =
-    case T.stripPrefix "ghc-" txt of
-        Just vTxt -> bimap displayException CompilerGHC $ parseVersionThrowing (T.unpack vTxt)
-        Nothing -> Left $ "Invalid prefix for compiler: " <> T.unpack txt
-
-
 
 data SnapshotFile = SnapshotFile
     { sfName      :: !SnapName
-    , sfCompiler  :: !Compiler
+    , sfCompiler  :: !CompilerP
     , sfPackages  :: ![PantryPackage]
     , sfHidden    :: !(Map PackageNameP Bool)
-    , sfFlags     :: !(Map PackageNameP (Map Text Bool))
+    , sfFlags     :: !(Map PackageNameP (Map FlagNameP Bool))
     , sfCreatedOn :: !(Maybe Day) -- TODO: switch to UTCTime and get it from yaml
     }
+
+
+-- data PantryOrigin =
+--   PantryHackage HackageOrigin
+--   | PantryRepo Repo
+--   | PantryArchive Archive
+
+-- data PantryPackage = PantryPackage
+--     { ppPantryOrigin :: !PantryOrigin
+--     , ppPantryKey    :: !TreeKey
+--     } deriving (Show)
+
+
+-- data HackageOrigin = HackageOrigin
+--     { hoPackageName    :: !PackageNameP
+--     , hoPackageVersion :: !VersionP
+--     , hoCabalKey       :: !BlobKey
+--     } deriving (Show)
 
 
 data PantryCabal = PantryCabal
@@ -219,7 +211,7 @@ instance FromJSON PantryCabal where
                 either fail (pure . first FileSize) =<<
                 maybe
                     (fail $ "Wrong size format:" ++ show sizeWithComma)
-                    (pure . T.decimal)
+                    (pure . decimal)
                     (T.stripPrefix "," sizeWithComma)
             let pcCabalKey = BlobKey pcSHA256 pcFileSize
             return PantryCabal {..}
@@ -269,10 +261,35 @@ data HackageCabalInfo = HackageCabalInfo
     , hciRevision    :: !(Maybe Revision)
     } deriving (Show, Eq)
 
-data PackageOrigin =
-  HackageOrigin !HackageCabalInfo
-  deriving (Show, Eq)
- -- etc. | GitRepo URL | MercurialRepo URL | Archive URL
+
+data PackageOrigin
+    = Core
+    | Hackage
+    | Archive
+    | GitRepo
+    | HgRepo
+    deriving (Show, Eq)
+
+
+instance PersistField PackageOrigin where
+    toPersistValue =
+        toPersistValue . \case
+            Core    -> 0 :: Int64
+            Hackage -> 1
+            Archive -> 2
+            GitRepo -> 3
+            HgRepo  -> 4
+    fromPersistValue v =
+        fromPersistValue v >>= \case
+            0 -> Right Core
+            1 -> Right Hackage
+            2 -> Right Archive
+            3 -> Right GitRepo
+            4 -> Right HgRepo
+            n -> Left $ "Unknown origin type: " <> textDisplay (n :: Int64)
+instance PersistFieldSql PackageOrigin where
+    sqlType _ = SqlInt64
+
 
 data SnapshotPackageInfo = SnapshotPackageInfo
     { spiTreeId      :: !TreeId

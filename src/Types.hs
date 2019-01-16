@@ -1,59 +1,95 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE NoImplicitPrelude          #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE ViewPatterns               #-}
 module Types
     ( SnapshotBranch(..)
     , PackageNameP(..)
     , VersionP(..)
     , Revision(..)
     , VersionRev(..)
+    , VersionRangeP(..)
+    , CompilerP(..)
+    , FlagNameP(..)
     , PackageVersionRev(..)
     , ModuleNameP(..)
     , moduleNameFromComponents
     , PackageIdentifierP(..)
     , PackageNameVersion(..)
+    , GenericPackageDescription
     , HoogleVersion(..)
     , currentHoogleVersion
     , UnpackStatus(..)
-    , StackageExecutable(..)
     , GhcMajorVersion(..)
     , GhcMajorVersionFailedParse(..)
     , ghcMajorVersionFromText
+    , keepMajorVersion
     , dtDisplay
+    , dtParse
     , SupportedArch(..)
     , Year
     , Month(Month)
     ) where
 
-import RIO
-import Data.Aeson
-import Data.Hashable (hashUsing)
-import Text.Blaze (ToMarkup(..))
-import Database.Persist.Sql (PersistFieldSql (sqlType))
-import Database.Persist
-import qualified Data.Text as T
-import qualified Data.Text.Read as Reader
-import Data.Char (ord)
-import Control.Monad.Catch (MonadThrow, throwM)
-import Pantry.Types
-import Web.PathPieces
-import Data.Hashable
-import Database.Esqueleto.Internal.Language
-import ClassyPrelude.Yesod (ToBuilder(..))
-import Distribution.ModuleName (ModuleName(..))
-import qualified Distribution.Text as DT (Text, display, simpleParse)
-import qualified Distribution.ModuleName as DT (validModuleComponent, fromComponents, components)
+import           ClassyPrelude.Yesod                  (ToBuilder (..))
+import           Control.Monad.Catch                  (MonadThrow, throwM)
+import           Data.Aeson
+import           Data.Bifunctor                       (bimap)
+import           Data.Char                            (ord)
+import           Data.Hashable                        (hashUsing)
+import           Data.Hashable
+import qualified Data.Text                            as T
+import qualified Data.Text.Read                       as Reader
+import           Data.Typeable
+import           Database.Esqueleto.Internal.Language
+import           Database.Persist
+import           Database.Persist.Sql                 (PersistFieldSql (sqlType))
+import qualified Distribution.ModuleName              as DT (ModuleName,
+                                                             components,
+                                                             fromComponents,
+                                                             validModuleComponent)
+import           Distribution.PackageDescription      (FlagName,
+                                                       GenericPackageDescription)
+import qualified Distribution.Text                    as DT (Text, display,
+                                                             simpleParse)
+import           Distribution.Types.VersionRange      (VersionRange)
+import           Distribution.Version                 (mkVersion,
+                                                       versionNumbers)
+import           Pantry.Types
+import           RIO
+import qualified RIO.Map                              as Map
+import           Text.Blaze                           (ToMarkup (..))
+import           Web.PathPieces
+
+data ParseFailedException = ParseFailedException !TypeRep !String
+    deriving (Show, Typeable)
+instance Exception ParseFailedException where
+
+  displayException (ParseFailedException tyRep origString) =
+    "Was unable to parse " ++ (showsTypeRep tyRep ": ") ++ origString
+
+dtParse :: forall a m. (Typeable a, DT.Text a, MonadThrow m) => Text -> m a
+dtParse txt =
+    let str = T.unpack txt
+     in case DT.simpleParse str of
+            Nothing -> throwM $ ParseFailedException (typeRep (Proxy :: Proxy a)) str
+            Just dt -> pure dt
 
 dtDisplay :: (DT.Text a, IsString b) => a -> b
 dtDisplay = fromString . DT.display
+
 
 data SnapshotBranch = LtsMajorBranch Int
                     | LtsBranch
                     | NightlyBranch
                     deriving (Eq, Read, Show)
 instance PathPiece SnapshotBranch where
-    toPathPiece NightlyBranch = "nightly"
-    toPathPiece LtsBranch     = "lts"
+    toPathPiece NightlyBranch      = "nightly"
+    toPathPiece LtsBranch          = "lts"
     toPathPiece (LtsMajorBranch x) = "lts-" <> T.pack (show x)
 
     fromPathPiece "nightly" = Just NightlyBranch
@@ -110,6 +146,13 @@ instance ToMarkup VersionP where
 instance ToBuilder VersionP Builder where
     toBuilder = getUtf8Builder . display
 
+keepMajorVersion :: VersionP -> VersionP
+keepMajorVersion pver@(VersionP ver) =
+    case versionNumbers ver of
+        nums@(_major:_minor:_) -> VersionP (mkVersion nums)
+        _                      -> pver
+
+
 instance ToMarkup Revision where
     toMarkup (Revision r) = "rev:" <> toMarkup r
 
@@ -150,20 +193,6 @@ data UnpackStatus = USReady
                   | USBusy
                   | USFailed !Text
 
-data StackageExecutable
-    = StackageWindowsExecutable
-    | StackageUnixExecutable
-    deriving (Show, Read, Eq)
-
-instance PathPiece StackageExecutable where
-    -- TODO: distribute stackage, not just stackage-setup
-    toPathPiece StackageWindowsExecutable = "stackage-setup.exe"
-    toPathPiece StackageUnixExecutable = "stackage-setup"
-
-    fromPathPiece "stackage-setup" = Just StackageUnixExecutable
-    fromPathPiece "stackage-setup.exe" = Just StackageWindowsExecutable
-    fromPathPiece _ = Nothing
-
 data GhcMajorVersion = GhcMajorVersion !Int !Int
   deriving (Eq)
 
@@ -178,7 +207,7 @@ ghcMajorVersionFromText :: MonadThrow m => Text -> m GhcMajorVersion
 ghcMajorVersionFromText t = case Reader.decimal t of
   Right (a, T.uncons -> Just ('.', t')) -> case Reader.decimal t' of
     Right (b, t'') | T.null t'' -> return $ GhcMajorVersion a b
-    _ -> failedParse
+    _                           -> failedParse
   _ -> failedParse
   where
     failedParse = throwM $ GhcMajorVersionFailedParse t
@@ -192,7 +221,7 @@ instance PersistField GhcMajorVersion where
         t <- fromPersistValueText v
         case ghcMajorVersionFromText t of
             Just ver -> return ver
-            Nothing -> Left $ "Cannot convert to GhcMajorVersion: " <> t
+            Nothing  -> Left $ "Cannot convert to GhcMajorVersion: " <> t
 
 instance Hashable GhcMajorVersion where
   hashWithSalt = hashUsing textDisplay
@@ -218,20 +247,51 @@ instance Hashable SupportedArch where
     hashWithSalt = hashUsing fromEnum
 
 instance PathPiece SupportedArch where
-    toPathPiece Win32 = "win32"
-    toPathPiece Win64 = "win64"
+    toPathPiece Win32   = "win32"
+    toPathPiece Win64   = "win64"
     toPathPiece Linux32 = "linux32"
     toPathPiece Linux64 = "linux64"
-    toPathPiece Mac32 = "mac32"
-    toPathPiece Mac64 = "mac64"
+    toPathPiece Mac32   = "mac32"
+    toPathPiece Mac64   = "mac64"
 
-    fromPathPiece "win32" = Just Win32
-    fromPathPiece "win64" = Just Win64
+    fromPathPiece "win32"   = Just Win32
+    fromPathPiece "win64"   = Just Win64
     fromPathPiece "linux32" = Just Linux32
     fromPathPiece "linux64" = Just Linux64
-    fromPathPiece "mac32" = Just Mac32
-    fromPathPiece "mac64" = Just Mac64
-    fromPathPiece _ = Nothing
+    fromPathPiece "mac32"   = Just Mac32
+    fromPathPiece "mac64"   = Just Mac64
+    fromPathPiece _         = Nothing
+
+
+newtype CompilerP =
+    CompilerGHC { ghcVersion :: VersionP }
+    deriving (Eq, Ord)
+
+instance Show CompilerP where
+    show = T.unpack . textDisplay
+
+instance FromJSONKey CompilerP where
+    fromJSONKey = FromJSONKeyTextParser (either fail pure . parseCompilerP)
+
+instance Display CompilerP where
+    display (CompilerGHC vghc) = "ghc-" <> display vghc
+instance ToJSON CompilerP where
+    toJSON = String . textDisplay
+instance FromJSON CompilerP where
+    parseJSON = withText "CompilerP" (either fail return .  parseCompilerP)
+instance PersistField CompilerP where
+    toPersistValue = PersistText . textDisplay
+    fromPersistValue v = fromPersistValue v >>= mapLeft T.pack . parseCompilerP
+instance PersistFieldSql CompilerP where
+    sqlType _ = SqlString
+
+parseCompilerP :: Text -> Either String CompilerP
+parseCompilerP txt =
+    case T.stripPrefix "ghc-" txt of
+        Just vTxt ->
+            bimap displayException (CompilerGHC . VersionP) $ parseVersionThrowing (T.unpack vTxt)
+        Nothing -> Left $ "Invalid prefix for compiler: " <> T.unpack txt
+
 
 type Year = Int
 newtype Month =
@@ -248,32 +308,41 @@ instance PathPiece Month where
         | '1' <= c && c <= '9' = Just $ Month $ ord c - ord '0'
     fromPathPiece _ = Nothing
 
-
+newtype VersionRangeP = VersionRangeP
+    { unVersionRangeP :: VersionRange
+    } deriving (Eq, Show, Read, Data, NFData)
+instance Display VersionRangeP where
+    display = dtDisplay . unVersionRangeP
+    textDisplay = dtDisplay . unVersionRangeP
+instance ToMarkup VersionRangeP where
+    toMarkup = dtDisplay . unVersionRangeP
+instance PersistField VersionRangeP where
+    toPersistValue = PersistText . textDisplay
+    fromPersistValue v =
+        fromPersistValue v >>= bimap (T.pack . displayException) VersionRangeP . dtParse
+instance PersistFieldSql VersionRangeP where
+    sqlType _ = SqlString
 
 newtype ModuleNameP = ModuleNameP
-    { unModuleNameP :: ModuleName
+    { unModuleNameP :: DT.ModuleName
     } deriving (Eq, Ord, Show, Read, Data, NFData, IsString)
 instance Display ModuleNameP where
     display = dtDisplay . unModuleNameP
     textDisplay = dtDisplay . unModuleNameP
 instance PersistField ModuleNameP where
     toPersistValue = PersistText . textDisplay
-    fromPersistValue v = fromPersistValue v >>= parseModuleNameP
-
-parseModuleNameP :: Text -> Either Text ModuleNameP
-parseModuleNameP txt =
-    case DT.simpleParse $ T.unpack txt of
-        Nothing -> Left $ "Was unable to parse ModuleName: " <> txt
-        Just moduleName -> Right $ ModuleNameP moduleName
+    fromPersistValue v =
+        fromPersistValue v >>= bimap (T.pack . displayException) ModuleNameP . dtParse
+instance PersistFieldSql ModuleNameP where
+    sqlType _ = SqlString
 
 -- | Construct a module name from valid components
 moduleNameFromComponents :: [Text] -> ModuleNameP
 moduleNameFromComponents = ModuleNameP . DT.fromComponents . map T.unpack
 
-instance PersistFieldSql ModuleNameP where
-    sqlType _ = SqlString
 instance ToMarkup ModuleNameP where
     toMarkup = dtDisplay . unModuleNameP
+-- In urls modules are represented with dashes, instead of dots, i.e. Foo-Bar-Baz vs Foo.Bar.Baz
 instance PathPiece ModuleNameP where
     toPathPiece (ModuleNameP moduleName) =
       T.intercalate "-" $ map T.pack $ DT.components moduleName
@@ -283,3 +352,38 @@ instance PathPiece ModuleNameP where
       let moduleComponents = T.unpack <$> T.split (== '-') moduleNameDashesNoDot
       guard (all DT.validModuleComponent moduleComponents)
       pure $ ModuleNameP $ DT.fromComponents moduleComponents
+
+
+
+newtype FlagNameP = FlagNameP
+    { unFlagNameP :: FlagName
+    } deriving (Eq, Ord, Show, Read, Data, NFData)
+
+instance Display FlagNameP where
+    display = dtDisplay . unFlagNameP
+    textDisplay = dtDisplay . unFlagNameP
+
+instance ToMarkup FlagNameP where
+    toMarkup = dtDisplay . unFlagNameP
+
+instance PersistField FlagNameP where
+    toPersistValue = PersistText . textDisplay
+    fromPersistValue v = mapLeft T.pack . parseFlagNameP =<< fromPersistValue v
+instance PersistFieldSql FlagNameP where
+    sqlType _ = SqlString
+instance PersistField (Map FlagNameP Bool) where
+    toPersistValue = toPersistValue . Map.mapKeys textDisplay
+    fromPersistValue v =
+        fmap Map.fromList .
+        traverse (\(k, f) -> (,) <$> mapLeft T.pack (parseFlagNameP k) <*> fromPersistValue f) =<<
+        getPersistMap v
+instance PersistFieldSql (Map FlagNameP Bool) where
+    sqlType _ = SqlString
+
+instance FromJSON FlagNameP where
+    parseJSON = withText "FlagName" (either fail pure . parseFlagNameP)
+instance FromJSONKey FlagNameP where
+    fromJSONKey = FromJSONKeyTextParser (either fail pure . parseFlagNameP)
+
+parseFlagNameP :: Text -> Either String FlagNameP
+parseFlagNameP = bimap displayException FlagNameP . dtParse

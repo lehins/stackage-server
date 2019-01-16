@@ -19,7 +19,6 @@ import           Data.These
 import           RIO
 import           Stackage.Database (SnapshotId, GetStackageDatabase, getPackagesForSnapshot)
 import           Stackage.Database.Types (SnapName, PackageListingInfo(..))
-import           Stackage.Types (dtDisplay)
 import           Types
 import           Web.PathPieces
 
@@ -41,7 +40,7 @@ toDiffList = sortOn (toCaseFold . textDisplay . fst) . HashMap.toList . unSnapsh
 
 versionPrefix :: VersionChange -> Maybe (Text, Text, Text)
 versionPrefix vc = case unVersionChange vc of
-        These (VersionP a) (VersionP b) -> T.commonPrefixes (dtDisplay a) (dtDisplay b)
+        These va vb -> T.commonPrefixes (textDisplay va) (textDisplay vb)
         _ -> Nothing
 
 versionedDiffList :: [(PackageNameP, VersionChange)] -> [(PackageNameP, VersionChange, Maybe (Text, Text, Text))]

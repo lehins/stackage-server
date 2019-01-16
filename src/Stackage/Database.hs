@@ -1,4 +1,13 @@
-{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE FunctionalDependencies     #-}
+{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE NoImplicitPrelude          #-}
+{-# LANGUAGE QuasiQuotes                #-}
+{-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE LambdaCase #-}
 module Stackage.Database
     ( -- * Database
@@ -82,7 +91,7 @@ import qualified Data.Aeson as A
 import Types (SnapshotBranch(..), PackageVersionRev(..), VersionRev(..))
 import Data.Pool (destroyAllResources)
 import Pantry.Types (BlobKey(..), HasPantryConfig(..), PantryConfig(pcStorage), Storage(Storage))
-import Pantry.Storage hiding (migrateAll)
+import Pantry.Storage hiding (migrateAll, getPackageNameId)
 import qualified Pantry.Storage as Pantry (migrateAll)
 import Control.Monad.Trans.Class (lift)
 import Types
@@ -100,7 +109,7 @@ Schema
 
 Snapshot
     name SnapName
-    compiler Compiler
+    compiler CompilerP
     created Day
     updatedOn UTCTime Maybe
     UniqueSnapshot name
@@ -152,7 +161,7 @@ Deprecated
 instance A.ToJSON Snapshot where
   toJSON Snapshot{..} =
     A.object [ "name"     A..= snapshotName
-             , "ghc"      A..= VersionP ghc -- TODO: deprecate, since encapsulated in compiler?
+             , "ghc"      A..= ghc -- TODO: deprecate, since encapsulated in compiler?
              , "compiler" A..= snapshotCompiler
              , "created"  A..= formatTime defaultTimeLocale "%F" snapshotCreated
              ]
@@ -390,9 +399,9 @@ lookupSnapshot name = run $ getBy $ UniqueSnapshot name
 snapshotTitle :: Snapshot -> Text
 snapshotTitle s = snapshotPrettyName (snapshotName s) (snapshotCompiler s)
 
-snapshotPrettyName :: SnapName -> Compiler -> Text
+snapshotPrettyName :: SnapName -> CompilerP -> Text
 snapshotPrettyName sName sCompiler =
-    T.concat [snapshotPrettyNameShort sName, " (", displayCompiler sCompiler, ")"]
+    T.concat [snapshotPrettyNameShort sName, " (", textDisplay sCompiler, ")"]
 
 snapshotPrettyNameShort :: SnapName -> Text
 snapshotPrettyNameShort name =
@@ -835,7 +844,7 @@ getSnapshotsForPackage
     :: GetStackageDatabase env m
     => PackageNameP
     -> Maybe Int
-    -> m [(SnapName, Compiler, HackageCabalInfo)]
+    -> m [(SnapName, CompilerP, HackageCabalInfo)]
 getSnapshotsForPackage pname mlimit =
     map (\(Single sn, Single c, scid, sbid, sv, srev) ->
              (sn, c, toHackageCabalInfo pname (scid, sbid, sv, srev))) <$>
@@ -951,7 +960,7 @@ getLatestLtsByGhc =
     toTuple (Entity _ lts, Entity _ snapshot) =
         ( ltsMajor lts
         , ltsMinor lts
-        , displayCompiler (snapshotCompiler snapshot)
+        , textDisplay (snapshotCompiler snapshot)
         , snapshotCreated snapshot)
     dedupe [] = []
     dedupe (x:xs) = x : dedupe (dropWhile (\y -> thd x == thd y) xs)
