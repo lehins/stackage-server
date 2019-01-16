@@ -20,6 +20,7 @@ import qualified Data.ByteString.Char8           as BS8
 import qualified Data.ByteString.Lazy            as LBS
 import qualified Data.ByteString.Lazy.Char8      as LBS8
 import qualified Data.Conduit.Binary             as CB
+import qualified Data.IntMap.Strict              as IntMap
 import           Data.Conduit.Zlib               (WindowBits (WindowBits),
                                                   compress, ungzip)
 import           Data.Streaming.Network          (bindPortTCP)
@@ -166,8 +167,9 @@ stackageServerCron forceUpdate = do
     pantryRootDir <- parseAbsDir (stackageRootDir </> "pantry")
     createDirectoryIfMissing True (toFilePath pantryRootDir)
     updateRef <- newMVar True
-    cabalImmutable <- newIORef Map.empty
+    cabalImmutable <- newIORef (error "Damn it is used") -- TODO: Map.empty
     cabalMutable <- newIORef Map.empty
+    gpdCache <- newIORef IntMap.empty
     defaultProcessContext <- mkDefaultProcessContext
     aws <- newEnv Discover
     withLogFunc (setLogMinLevel LevelInfo lo) $ \ logFunc ->
@@ -184,15 +186,16 @@ stackageServerCron forceUpdate = do
                                   , scStackageRoot = stackageRootDir
                                   , scProcessContext = defaultProcessContext
                                   , scLogFunc = logFunc
-                                  , sfForceFullUpdate = forceUpdate
-                                  , sfEnvAWS = aws
+                                  , scForceFullUpdate = forceUpdate
+                                  , scCachedGPD = gpdCache
+                                  , scEnvAWS = aws
                                   }
       in runRIO stackage runStackageUpdate
 
 
 runStackageUpdate :: RIO StackageCron ()
 runStackageUpdate = do
-    forceFullUpdate <- sfForceFullUpdate <$> ask
+    forceFullUpdate <- scForceFullUpdate <$> ask
     logInfo $ "Starting stackage-cron update" <> bool "" " with --force-update" forceFullUpdate
     runStackageMigrations
     didUpdate <- forceUpdateHackageIndex (Just "stackage-server cron job")
@@ -206,7 +209,7 @@ runStackageUpdate = do
     finalAction <-
         runConduitRes $
         sourceSnapshots .|
-        foldMC (createOrUpdateSnapshot forceFullUpdate corePackageGetters) (pure ())
+        foldMC (createOrUpdateSnapshot corePackageGetters) (pure ())
     runResourceT finalAction
     run $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
 
@@ -276,6 +279,20 @@ addPantryPackage ::
        SnapshotId -> CompilerP -> Bool -> Map FlagNameP Bool -> PantryPackage -> RIO StackageCron Bool
 addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
     hasAddedPackageRef <- newIORef False
+    gpdCachedRef <- scCachedGPD <$> ask
+    let blobKeyToInt = fromIntegral . unSqlBackendKey . unBlobKey
+    let updateGPDcache blobId gpd =
+            atomicModifyIORef' gpdCachedRef (\cacheMap -> (IntMap.insert blobId gpd cacheMap, gpd))
+    let getGPD treeCabal =
+            \case
+                Just gpd -> updateGPDcache (blobKeyToInt treeCabal) gpd
+                Nothing -> do
+                    cacheMap <- readIORef gpdCachedRef
+                    case IntMap.lookup (blobKeyToInt treeCabal) cacheMap of
+                        Just gpd -> pure gpd
+                        Nothing ->
+                            fmap parseCabalBlob (loadBlobById treeCabal) >>=
+                            updateGPDcache (blobKeyToInt treeCabal)
     let onGPD mtid mgpd = do
             getTreeForKey treeKey >>= \case
                 mTree@(Just (Entity treeId Tree {treeName, treeVersion, treeCabal}))
@@ -283,11 +300,10 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
                         mhcid <-
                             fmap entityKey <$>
                             getBy (UniqueHackage treeName treeVersion (Revision 0))
-                        gpd <- maybe (parseCabalBlob <$> loadBlobById treeCabal) return mgpd
+                        gpd <- getGPD treeCabal mgpd
                         addSnapshotPackage sid compiler Hackage mTree mhcid isHidden flags pid gpd
                         writeIORef hasAddedPackageRef True
-                _ ->
-                    lift $ logError $ "Unexpected problem loading the tree for " <> display pid
+                _ -> lift $ logError $ "Unexpected problem loading the tree for " <> display pid
     _pkg <-
         getHackageTarballOnGPD
             (\treeId gpd -> run $ onGPD (Just treeId) (Just gpd))
@@ -395,10 +411,10 @@ sourceSnapshots = do
 -- | Creates a new snapshot if it is not yet present in the database and decides further if update
 -- is necessary.
 decideOnSnapshotUpdate ::
-       Bool -- ^ When True, will trigger the update regardless of the updatedOn timestamp.
-    -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
+    (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
     -> RIO StackageCron (Maybe (SnapshotId, SnapshotFile))
-decideOnSnapshotUpdate forceUpdate (snapName, updatedOn, parseSnapshotFile) = do
+decideOnSnapshotUpdate (snapName, updatedOn, parseSnapshotFile) = do
+    forceUpdate <- scForceFullUpdate <$> ask
     let mkLogMsg rest = "Snapshot with name: " <> display snapName <> " " <> rest
     mKeySnapFile <-
         run (getBy (UniqueSnapshot snapName)) >>= \case
@@ -435,17 +451,16 @@ type CorePackageGetter
 -- an action that should be invoked in order to mark modules that have documentation available,
 -- which in turn can be passed as an argument to the next snapshot loader.
 createOrUpdateSnapshot ::
-       Bool
-    -> Map CompilerP [CorePackageGetter]
+       Map CompilerP [CorePackageGetter]
     -> ResourceT (RIO StackageCron) ()
     -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
     -> ResourceT (RIO StackageCron) (ResourceT (RIO StackageCron) ())
-createOrUpdateSnapshot forceUpdate corePackageInfoGetters prevAction snapInfo = do
+createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo = do
     snd <$> concurrently prevAction (lift loadCurrentSnapshot)
   where
     (_, updatedOn, _) = snapInfo
     loadCurrentSnapshot =
-        decideOnSnapshotUpdate forceUpdate snapInfo >>= \case
+        decideOnSnapshotUpdate snapInfo >>= \case
             Nothing -> return $ pure ()
             Just (snapshotId, snapshotFile) ->
                 updateSnapshot corePackageInfoGetters snapshotId updatedOn snapshotFile

@@ -111,12 +111,13 @@ data StackageCron = StackageCron
     , scStackageRoot    :: !FilePath
     , scLogFunc         :: !LogFunc
     , scProcessContext  :: !ProcessContext
-    , sfForceFullUpdate :: !Bool
-    , sfEnvAWS          :: !Env
+    , scForceFullUpdate :: !Bool
+    , scCachedGPD       :: !(IORef (IntMap GenericPackageDescription))
+    , scEnvAWS          :: !Env
     }
 
 instance HasEnv StackageCron where
-    environment = lens sfEnvAWS (\c f -> c {sfEnvAWS = f})
+    environment = lens scEnvAWS (\c f -> c {scEnvAWS = f})
 
 instance HasLogFunc StackageCron where
     logFuncL = lens scLogFunc (\c f -> c {scLogFunc = f})

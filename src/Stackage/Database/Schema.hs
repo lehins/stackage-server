@@ -47,7 +47,8 @@ import           Database.Persist
 import           Database.Persist.Postgresql
 import           Database.Persist.Sql        (IsolationLevel (..))
 import           Database.Persist.TH
-import           Pantry.Storage              as PS (BlobId, HackageCabalId,
+import           Pantry.Storage              as PS (BlobId, unBlobKey,
+                                                    HackageCabalId,
                                                     PackageNameId, Tree (..),
                                                     TreeEntry (..), TreeEntryId,
                                                     TreeId, Unique (..),

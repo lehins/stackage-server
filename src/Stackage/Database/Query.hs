@@ -227,15 +227,28 @@ markModuleHasDocs ::
     -> ModuleNameP
     -> ReaderT SqlBackend m (Maybe SnapshotPackageId)
 markModuleHasDocs snapshotId pid mSnapshotPackageId modName =
+    -- maybe (getSnapshotPackageId snapshotId pid) (pure . Just) mSnapshotPackageId >>= \case
+    --     Just snapshotPackageId -> do
+    --         getBy (UniqueModule modName) >>= \case
+    --             Just (Entity modNameId _) ->
+    --                 updateWhere
+    --                     [ SnapshotPackageModuleSnapshotPackage P.==. snapshotPackageId
+    --                     , SnapshotPackageModuleModule P.==. modNameId
+    --                     ]
+    --                     [SnapshotPackageModuleHasDocs P.=. True]
+    --             Nothing -> pure ()
+    --         return $ Just snapshotPackageId
+    --     Nothing -> return Nothing
+
     maybe (getSnapshotPackageId snapshotId pid) (pure . Just) mSnapshotPackageId >>= \case
         Just snapshotPackageId -> do
-            getBy (UniqueModule modName) >>= \case
-                Just (Entity modNameId _) ->
-                    updateWhere
-                        [ SnapshotPackageModuleSnapshotPackage P.==. snapshotPackageId
-                        , SnapshotPackageModuleModule P.==. modNameId
-                        ]
-                        [SnapshotPackageModuleHasDocs P.=. True]
-                Nothing -> pure ()
+            rawExecute
+                    "UPDATE snapshot_package_module \
+                    \SET has_docs = true \
+                    \FROM module \
+                    \WHERE module.id = snapshot_package_module.module \
+                    \AND module.name = ? \
+                    \AND snapshot_package_module.snapshot_package = ?"
+                    [toPersistValue modName, toPersistValue snapshotPackageId]
             return $ Just snapshotPackageId
         Nothing -> return Nothing
