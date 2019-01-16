@@ -91,7 +91,7 @@ insertDeps snapshotPackageId dependencies =
 -- TODO: Optimize, whenever package is already in one snapshot only create the modules and new
 -- SnapshotPackage
 addSnapshotPackage ::
-       (MonadIO m, MonadReader env m, HasLogFunc env)
+       (GetStackageDatabase env m, MonadReader env m, HasLogFunc env)
     => SnapshotId
     -> CompilerP
     -> PackageOrigin
@@ -101,19 +101,22 @@ addSnapshotPackage ::
     -> Map FlagNameP Bool
     -> PackageIdentifierP
     -> GenericPackageDescription
-    -> ReaderT SqlBackend m ()
+    -> m ()
 addSnapshotPackage snapshotId compiler origin mTree mHackageCabalId isHidden flags pid gpd = do
     let PackageIdentifierP pname pver = pid
         keyInsertBy = fmap (either entityKey id) . P.insertBy
-    packageNameId <-
-        maybe (getPackageNameId (unPackageNameP pname)) (pure . treeName . entityVal) mTree
-    versionId <- maybe (getVersionId (unVersionP pver)) (pure . treeVersion . entityVal) mTree
+    (packageNameId, versionId) <-
+        run $ do
+            pnid <-
+                maybe (getPackageNameId (unPackageNameP pname)) (pure . treeName . entityVal) mTree
+            vid <- maybe (getVersionId (unVersionP pver)) (pure . treeVersion . entityVal) mTree
+            pure (pnid, vid)
     let snapshotPackage =
             SnapshotPackage
                 { snapshotPackageSnapshot = snapshotId
                 , snapshotPackagePackageName = packageNameId
                 , snapshotPackageVersion = versionId
-                , snapshotPackageCabal = treeCabal . entityVal <$>  mTree
+                , snapshotPackageCabal = treeCabal . entityVal <$> mTree
                 , snapshotPackageHackageCabal = mHackageCabalId
                 , snapshotPackageOrigin = origin
                 , snapshotPackageOriginUrl = "" -- TODO: add
@@ -123,9 +126,9 @@ addSnapshotPackage snapshotId compiler origin mTree mHackageCabalId isHidden fla
                 , snapshotPackageIsHidden = isHidden
                 , snapshotPackageFlags = flags
                 }
-    snapshotPackageId <- keyInsertBy snapshotPackage
+    snapshotPackageId <- run $ keyInsertBy snapshotPackage
     -- TODO: collect all missing dependencies
-    _ <- insertDeps snapshotPackageId (extractDependencies compiler flags gpd)
+    _ <- run $ insertDeps snapshotPackageId (extractDependencies compiler flags gpd)
     insertSnapshotPackageModules snapshotPackageId (getModuleNames gpd)
 
 
@@ -212,11 +215,28 @@ getSnapshotPackageId snapshotId (PackageIdentifierP pname ver) =
 -- | Add all modules available for the package in a particular snapshot. Initially they are marked
 -- as without available documentation.
 insertSnapshotPackageModules ::
-       MonadIO m => SnapshotPackageId -> [ModuleNameP] -> ReaderT SqlBackend m ()
+       GetStackageDatabase env m => SnapshotPackageId -> [ModuleNameP] -> m ()
 insertSnapshotPackageModules snapshotPackageId =
     mapM_ $ \modName -> do
-        moduleId <- either entityKey id <$> P.insertBy (Module modName)
-        void $ P.insertBy (SnapshotPackageModule snapshotPackageId moduleId False)
+        moduleId <- insertModuleSafe modName
+        void $ run $ P.insertBy (SnapshotPackageModule snapshotPackageId moduleId False)
+
+-- | Idempotent and thread safe way of adding a new module.
+insertModuleSafe :: GetStackageDatabase env m => ModuleNameP -> m ModuleId
+insertModuleSafe modName = do
+    eExc <- tryAny $ run $ P.insert_ $ Module modName
+    mModId <-
+        run
+            (select
+                 (from $ \m -> do
+                      where_ (m ^. ModuleName ==. val modName)
+                      return (m ^. ModuleId)))
+    case mModId of
+        [Value modId] -> return modId
+        _
+            | Left exc <- eExc -> throwM exc
+        _ -> error $ "Module name: " ++ show modName ++ " should have been inserted by now"
+
 
 markModuleHasDocs ::
        MonadIO m

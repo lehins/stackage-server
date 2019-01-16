@@ -135,7 +135,7 @@ instance A.ToJSON Snapshot where
 -- | Re-use Pantry's database connection pool
 type StackageDatabase = Storage
 
-class MonadUnliftIO m => GetStackageDatabase env m | m -> env where
+class (MonadThrow m, MonadUnliftIO m) => GetStackageDatabase env m | m -> env where
     getStackageDatabase :: m StackageDatabase
 
 

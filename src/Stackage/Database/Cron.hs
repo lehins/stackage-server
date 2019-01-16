@@ -290,25 +290,25 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
                     case IntMap.lookup (blobKeyToInt treeCabal) cacheMap of
                         Just gpd -> pure gpd
                         Nothing ->
-                            fmap parseCabalBlob (loadBlobById treeCabal) >>=
-                            updateCacheGPD (blobKeyToInt treeCabal)
+                            run (loadBlobById treeCabal) >>=
+                            updateCacheGPD (blobKeyToInt treeCabal) . parseCabalBlob
     let onGPD mtid mgpd = do
-            getTreeForKey treeKey >>= \case
+            run (getTreeForKey treeKey) >>= \case
                 mTree@(Just (Entity treeId Tree {treeName, treeVersion, treeCabal}))
                     | maybe True (== treeId) mtid -> do
                         mhcid <-
                             fmap entityKey <$>
-                            getBy (UniqueHackage treeName treeVersion (Revision 0))
+                            run (getBy (UniqueHackage treeName treeVersion (Revision 0)))
                         gpd <- getCachedGPD treeCabal mgpd
                         addSnapshotPackage sid compiler Hackage mTree mhcid isHidden flags pid gpd
                         writeIORef hasAddedPackageRef True
-                _ -> lift $ logError $ "Unexpected problem loading the tree for " <> display pid
+                _ -> logError $ "Unexpected problem loading the tree for " <> display pid
     _pkg <-
         getHackageTarballOnGPD
-            (\treeId gpd -> run $ onGPD (Just treeId) (Just gpd))
+            (\treeId gpd -> onGPD (Just treeId) (Just gpd))
             (toPackageIdentifierRevision pc)
             (Just treeKey)
-    unlessM (readIORef hasAddedPackageRef) $ run (onGPD Nothing Nothing)
+    unlessM (readIORef hasAddedPackageRef) $ onGPD Nothing Nothing
     readIORef hasAddedPackageRef
   where
     pid = PackageIdentifierP (pcPackageName pc) (pcPackageVersion pc)
@@ -496,7 +496,7 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
         Just compilerCorePackages ->
             forM_ compilerCorePackages $ \getCorePackageInfo -> do
                 (mTree, mhcid, pid, gpd) <- getCorePackageInfo
-                run $ addSnapshotPackage snapshotId sfCompiler Core mTree mhcid False mempty pid gpd
+                addSnapshotPackage snapshotId sfCompiler Core mTree mhcid False mempty pid gpd
     loadedPackageCountRef <- newIORef (0 :: Int)
     let totalPackages = length sfPackages
         progressReporter =
