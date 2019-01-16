@@ -159,15 +159,14 @@ stackageServerCron forceUpdate = do
     -- Hacky approach instead of PID files
     _ <- liftIO $ catchIO (bindPortTCP 17834 "127.0.0.1") $ \_ ->
         error $ "cabal loader process already running, exiting"
-    --let connectionCount = 2
-    connectionCount <- min 4 <$> getNumCapabilities
+    connectionCount <- getNumCapabilities
     storage <- initStorage connectionCount
     lo <- logOptionsHandle stdout True
     stackageRootDir <- getAppUserDataDirectory "stackage"
     pantryRootDir <- parseAbsDir (stackageRootDir </> "pantry")
     createDirectoryIfMissing True (toFilePath pantryRootDir)
     updateRef <- newMVar True
-    cabalImmutable <- newIORef (error "Damn it is used") -- TODO: Map.empty
+    cabalImmutable <- newIORef Map.empty
     cabalMutable <- newIORef Map.empty
     gpdCache <- newIORef IntMap.empty
     defaultProcessContext <- mkDefaultProcessContext
@@ -281,18 +280,18 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
     hasAddedPackageRef <- newIORef False
     gpdCachedRef <- scCachedGPD <$> ask
     let blobKeyToInt = fromIntegral . unSqlBackendKey . unBlobKey
-    let updateGPDcache blobId gpd =
+    let updateCacheGPD blobId gpd =
             atomicModifyIORef' gpdCachedRef (\cacheMap -> (IntMap.insert blobId gpd cacheMap, gpd))
-    let getGPD treeCabal =
+    let getCachedGPD treeCabal =
             \case
-                Just gpd -> updateGPDcache (blobKeyToInt treeCabal) gpd
+                Just gpd -> updateCacheGPD (blobKeyToInt treeCabal) gpd
                 Nothing -> do
                     cacheMap <- readIORef gpdCachedRef
                     case IntMap.lookup (blobKeyToInt treeCabal) cacheMap of
                         Just gpd -> pure gpd
                         Nothing ->
                             fmap parseCabalBlob (loadBlobById treeCabal) >>=
-                            updateGPDcache (blobKeyToInt treeCabal)
+                            updateCacheGPD (blobKeyToInt treeCabal)
     let onGPD mtid mgpd = do
             getTreeForKey treeKey >>= \case
                 mTree@(Just (Entity treeId Tree {treeName, treeVersion, treeCabal}))
@@ -300,7 +299,7 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
                         mhcid <-
                             fmap entityKey <$>
                             getBy (UniqueHackage treeName treeVersion (Revision 0))
-                        gpd <- getGPD treeCabal mgpd
+                        gpd <- getCachedGPD treeCabal mgpd
                         addSnapshotPackage sid compiler Hackage mTree mhcid isHidden flags pid gpd
                         writeIORef hasAddedPackageRef True
                 _ -> lift $ logError $ "Unexpected problem loading the tree for " <> display pid
@@ -321,14 +320,18 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
 -- in the database which modules have documentation available for them.
 checkForDocs :: SnapshotId -> SnapName -> ResourceT (RIO StackageCron) ()
 checkForDocs snapshotId snapName = do
-    mods <- runConduit $
+    mods <-
+        runConduit $
         AWS.paginate req .| concatMapC (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
         concatMapC (T.stripSuffix ".html") .|
         concatMapC (T.stripPrefix prefix) .|
         concatMapC pathToPackageModule .|
         sinkList
-    (_, notFoundSet) <- lift $ foldM markModules (Map.empty, Set.empty) mods
-    forM_ notFoundSet $ \pid ->
+    sidsCacheRef <- newIORef Map.empty
+    connCount <- pcConnectionCount <$> view pantryConfigL
+    notFoundList <- lift $ pooledMapConcurrentlyN connCount (markModules sidsCacheRef) mods
+    --(_, notFoundSet) <- lift $ foldM markModules (Map.empty, Set.empty) mods
+    forM_ (Set.fromList $ catMaybes notFoundList) $ \pid ->
         lift $
         logError $
         "Documentation available for package '" <> display pid <>
@@ -337,19 +340,33 @@ checkForDocs snapshotId snapName = do
   where
     prefix = textDisplay snapName <> "/"
     req = listObjectsV2 (BucketName haddockBucketName) & lovPrefix .~ Just prefix
-    -- It takes too long for each package to be looked up for each module in the db, so we cache
-    -- the ids for snapshot packages as well as record all packages that have documentation
-    -- available, but not found in the snapshot.
-    markModules (snapshotPackageIds, notFoundSet) (pid, modName) = do
-        let mSnapshotPackageId = Map.lookup pid snapshotPackageIds
+    -- | This function records all package modules that have documentation available, the ones
+    -- that are not found in the snapshot reported back as an error.  Besides being run
+    -- concurrently this function optimizes the SnapshotPackageId lookup as well, since that can
+    -- be shared amongst many modules of one package.
+    markModules sidsCacheRef (pid, modName) = do
+        sidsCache <- readIORef sidsCacheRef
+        let mSnapshotPackageId = Map.lookup pid sidsCache
         mFound <- run $ markModuleHasDocs snapshotId pid mSnapshotPackageId modName
-        pure $
-            case mFound of
-                Nothing -> (snapshotPackageIds, Set.insert pid notFoundSet)
-                Just snapshotPackageId
-                    | Nothing <- mSnapshotPackageId ->
-                        (Map.insert pid snapshotPackageId snapshotPackageIds, notFoundSet)
-                _ -> (snapshotPackageIds, notFoundSet)
+        case mFound of
+            Nothing -> pure $ Just pid
+            Just snapshotPackageId
+                | Nothing <- mSnapshotPackageId -> do
+                    atomicModifyIORef'
+                        sidsCacheRef
+                        (\cacheMap -> (Map.insert pid snapshotPackageId cacheMap, ()))
+                    pure Nothing
+            _ -> pure Nothing
+    -- markModules (snapshotPackageIds, notFoundSet) (pid, modName) = do
+    --     let mSnapshotPackageId = Map.lookup pid snapshotPackageIds
+    --     mFound <- run $ markModuleHasDocs snapshotId pid mSnapshotPackageId modName
+    --     pure $
+    --         case mFound of
+    --             Nothing -> (snapshotPackageIds, Set.insert pid notFoundSet)
+    --             Just snapshotPackageId
+    --                 | Nothing <- mSnapshotPackageId ->
+    --                     (Map.insert pid snapshotPackageId snapshotPackageIds, notFoundSet)
+    --             _ -> (snapshotPackageIds, notFoundSet)
 
 
 
@@ -499,7 +516,7 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
             curSucc <- addPantryPackage snapshotId sfCompiler isHidden flags pp
             atomicModifyIORef' loadedPackageCountRef (\c -> (c + 1, ()))
             pure curSucc
-    -- ensure we leave off one connection for doc loader
+    -- leave off one thread for the doc downloader
     connCount <- max 1 . subtract 1 . pcConnectionCount <$> view pantryConfigL
     ePantryUpdatesSucceeded <-
         race progressReporter $

@@ -124,7 +124,8 @@ addSnapshotPackage snapshotId compiler origin mTree mHackageCabalId isHidden fla
                 , snapshotPackageFlags = flags
                 }
     snapshotPackageId <- keyInsertBy snapshotPackage
-    insertDeps snapshotPackageId (extractDependencies compiler flags gpd)
+    -- TODO: collect all missing dependencies
+    _ <- insertDeps snapshotPackageId (extractDependencies compiler flags gpd)
     insertSnapshotPackageModules snapshotPackageId (getModuleNames gpd)
 
 
@@ -227,19 +228,6 @@ markModuleHasDocs ::
     -> ModuleNameP
     -> ReaderT SqlBackend m (Maybe SnapshotPackageId)
 markModuleHasDocs snapshotId pid mSnapshotPackageId modName =
-    -- maybe (getSnapshotPackageId snapshotId pid) (pure . Just) mSnapshotPackageId >>= \case
-    --     Just snapshotPackageId -> do
-    --         getBy (UniqueModule modName) >>= \case
-    --             Just (Entity modNameId _) ->
-    --                 updateWhere
-    --                     [ SnapshotPackageModuleSnapshotPackage P.==. snapshotPackageId
-    --                     , SnapshotPackageModuleModule P.==. modNameId
-    --                     ]
-    --                     [SnapshotPackageModuleHasDocs P.=. True]
-    --             Nothing -> pure ()
-    --         return $ Just snapshotPackageId
-    --     Nothing -> return Nothing
-
     maybe (getSnapshotPackageId snapshotId pid) (pure . Just) mSnapshotPackageId >>= \case
         Just snapshotPackageId -> do
             rawExecute
