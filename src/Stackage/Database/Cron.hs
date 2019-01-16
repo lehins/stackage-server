@@ -694,6 +694,54 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
 -- singleDB _ _ _ _ = return mempty
 
 
+-- -- | Same as `getHackageTarball`, but allows an extra action to be performed on the parsed
+-- -- `GenericPackageDescription` and newly created `TreeId`.
+-- ensureHackageTarball
+--   :: (HasPantryConfig env, HasLogFunc env)
+--   => (TreeId -> GenericPackageDescription -> RIO env ())
+--   -> PackageIdentiferRevision
+--   -> Maybe TreeKey
+--   -> RIO env Package
+-- ensureHackageTarball onGPD pir mExpTreeKey = do
+--   let PackageIdentifierRevision name ver cfi = pir
+--   mbidTreeKey <-
+--     withStorage $
+--           case cfi of
+--             CFIHash sha _ -> do
+--               mbid <- loadBlobBySHA sha
+--               case mbid of
+--                 Just bid -> do
+--                   mtreeKey <- loadHackageTreeKey name ver sha
+--                   return $ Just (bid, mtreeKey)
+--                 Nothing -> Nothing
+--             CFIRevision rev -> do
+--               revs <- loadHackagePackageVersion name ver
+--               case Map.lookup rev revs of
+--                 Just (bid, (BlobKey sha _)) -> do
+--                   mtreeKey <- loadHackageTreeKey name ver sha
+--                   return $ Just (bid, mtreeKey)
+--                 Nothing -> return Nothing
+--             cfi -> error $ "Unsupported selector: " <> show cfi
+--   -- See if the hackage package has already been loaded
+--   case mbidTreeKey of
+--     Nothing -> logError $ "Unknown package to hackage: " <> display pir
+--     (_, Just treeKey)
+--       | Just expTreeKey <- mExpTreeKey, expTreeKey /= treeKey ->
+--         logError $ "TreeKey received does not match for: " <> display pir
+--     (bid, Just treeKey) -> return bid
+--     (bid, Nothing) -> do
+--         pc <- view pantryConfigL
+--         let urlPrefix = hscDownloadPrefix $ pcHackageSecurity pc
+--             url = mconcat
+--               [ urlPrefix
+--               , "package/"
+--               , T.pack $ Distribution.Text.display name
+--               , "-"
+--               , T.pack $ Distribution.Text.display ver
+--               , ".tar.gz"
+--               ]
+--   -- TODO: load just the files that are needed (readme and chagelog)
+
 pathToPackageModule :: Text -> Maybe (PackageIdentifierP, ModuleNameP)
 pathToPackageModule txt =
     case T.split (== '/') txt of
@@ -702,5 +750,6 @@ pathToPackageModule txt =
              pkgId :: PackageIdentifierP <- fromPathPiece pkgIdentifier
              Just (pkgId, modName)
         _ -> Nothing
+
 
 

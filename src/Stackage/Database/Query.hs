@@ -105,33 +105,31 @@ addSnapshotPackage ::
 addSnapshotPackage snapshotId compiler origin mTree mHackageCabalId isHidden flags pid gpd = do
     let PackageIdentifierP pname pver = pid
         keyInsertBy = fmap (either entityKey id) . P.insertBy
-    (packageNameId, versionId) <-
+    snapshotPackageId <-
         run $ do
-            pnid <-
+            packageNameId <-
                 maybe (getPackageNameId (unPackageNameP pname)) (pure . treeName . entityVal) mTree
-            vid <- maybe (getVersionId (unVersionP pver)) (pure . treeVersion . entityVal) mTree
-            pure (pnid, vid)
-    let snapshotPackage =
-            SnapshotPackage
-                { snapshotPackageSnapshot = snapshotId
-                , snapshotPackagePackageName = packageNameId
-                , snapshotPackageVersion = versionId
-                , snapshotPackageCabal = treeCabal . entityVal <$> mTree
-                , snapshotPackageHackageCabal = mHackageCabalId
-                , snapshotPackageOrigin = origin
-                , snapshotPackageOriginUrl = "" -- TODO: add
-                , snapshotPackageSynopsis = getSynopsis gpd
-                , snapshotPackageReadme = Nothing -- TODO: find from Tree
-                , snapshotPackageChangelog = Nothing -- TODO: find from Tree
-                , snapshotPackageIsHidden = isHidden
-                , snapshotPackageFlags = flags
-                }
-    snapshotPackageId <- run $ keyInsertBy snapshotPackage
-    -- TODO: collect all missing dependencies
-    _ <- run $ insertDeps snapshotPackageId (extractDependencies compiler flags gpd)
+            versionId <- maybe (getVersionId (unVersionP pver)) (pure . treeVersion . entityVal) mTree
+            let snapshotPackage =
+                    SnapshotPackage
+                        { snapshotPackageSnapshot = snapshotId
+                        , snapshotPackagePackageName = packageNameId
+                        , snapshotPackageVersion = versionId
+                        , snapshotPackageCabal = treeCabal . entityVal <$> mTree
+                        , snapshotPackageHackageCabal = mHackageCabalId
+                        , snapshotPackageOrigin = origin
+                        , snapshotPackageOriginUrl = "" -- TODO: add
+                        , snapshotPackageSynopsis = getSynopsis gpd
+                        , snapshotPackageReadme = Nothing -- TODO: find from Tree
+                        , snapshotPackageChangelog = Nothing -- TODO: find from Tree
+                        , snapshotPackageIsHidden = isHidden
+                        , snapshotPackageFlags = flags
+                        }
+            snapshotPackageId <- keyInsertBy snapshotPackage
+            -- TODO: collect all missing dependencies
+            _ <- insertDeps snapshotPackageId (extractDependencies compiler flags gpd)
+            return snapshotPackageId
     insertSnapshotPackageModules snapshotPackageId (getModuleNames gpd)
-
-
 
 
 
