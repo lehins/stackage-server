@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE LambdaCase #-}
 module Stackage.Database.Query
     ( getLatestLtsByGhc
@@ -6,7 +7,8 @@ module Stackage.Database.Query
     , treeCabal
     -- * Needed for Cron Job
     , addSnapshotPackage
-    , getHackageCabalRev0
+    , getHackageCabalByRev0
+    , getHackageCabalByKey
     , snapshotMarkUpdated
     , insertSnapshotName
     , addDeprecated
@@ -72,10 +74,11 @@ getLatestLtsByGhc =
 -- all dependencies that could not be found in pantry
 insertDeps ::
        (MonadIO m, MonadReader env m, HasLogFunc env)
-    => SnapshotPackageId -- ^ For error reporting only.
+    => PackageIdentifierP -- ^ For error reporting only.
+    -> SnapshotPackageId
     -> Map PackageNameP VersionRangeP
     -> ReaderT SqlBackend m (Set PackageNameP)
-insertDeps snapshotPackageId dependencies =
+insertDeps pid snapshotPackageId dependencies =
     Map.keysSet <$> Map.traverseMaybeWithKey insertDep dependencies
   where
     insertDep dep range =
@@ -85,13 +88,15 @@ insertDeps snapshotPackageId dependencies =
                 return Nothing
             Nothing -> do
                 lift $
-                    logWarn $ "Couldn't find a dependency of in Pantry with name: " <> display dep
+                    logWarn $
+                    "Couldn't find a dependency of " <> display pid <> " in Pantry with name: " <>
+                    display dep
                 return $ Just dep
 
 -- TODO: Optimize, whenever package is already in one snapshot only create the modules and new
 -- SnapshotPackage
 addSnapshotPackage ::
-       (GetStackageDatabase env m, MonadReader env m, HasLogFunc env)
+       (MonadIO m, MonadReader env m, HasLogFunc env)
     => SnapshotId
     -> CompilerP
     -> PackageOrigin
@@ -101,34 +106,31 @@ addSnapshotPackage ::
     -> Map FlagNameP Bool
     -> PackageIdentifierP
     -> GenericPackageDescription
-    -> m ()
+    -> ReaderT SqlBackend m ()
 addSnapshotPackage snapshotId compiler origin mTree mHackageCabalId isHidden flags pid gpd = do
     let PackageIdentifierP pname pver = pid
         keyInsertBy = fmap (either entityKey id) . P.insertBy
-    snapshotPackageId <-
-        run $ do
-            packageNameId <-
-                maybe (getPackageNameId (unPackageNameP pname)) (pure . treeName . entityVal) mTree
-            versionId <- maybe (getVersionId (unVersionP pver)) (pure . treeVersion . entityVal) mTree
-            let snapshotPackage =
-                    SnapshotPackage
-                        { snapshotPackageSnapshot = snapshotId
-                        , snapshotPackagePackageName = packageNameId
-                        , snapshotPackageVersion = versionId
-                        , snapshotPackageCabal = treeCabal . entityVal <$> mTree
-                        , snapshotPackageHackageCabal = mHackageCabalId
-                        , snapshotPackageOrigin = origin
-                        , snapshotPackageOriginUrl = "" -- TODO: add
-                        , snapshotPackageSynopsis = getSynopsis gpd
-                        , snapshotPackageReadme = Nothing -- TODO: find from Tree
-                        , snapshotPackageChangelog = Nothing -- TODO: find from Tree
-                        , snapshotPackageIsHidden = isHidden
-                        , snapshotPackageFlags = flags
-                        }
-            snapshotPackageId <- keyInsertBy snapshotPackage
-            -- TODO: collect all missing dependencies
-            _ <- insertDeps snapshotPackageId (extractDependencies compiler flags gpd)
-            return snapshotPackageId
+    packageNameId <-
+        maybe (getPackageNameId (unPackageNameP pname)) (pure . treeName . entityVal) mTree
+    versionId <- maybe (getVersionId (unVersionP pver)) (pure . treeVersion . entityVal) mTree
+    let snapshotPackage =
+            SnapshotPackage
+                { snapshotPackageSnapshot = snapshotId
+                , snapshotPackagePackageName = packageNameId
+                , snapshotPackageVersion = versionId
+                , snapshotPackageCabal = treeCabal . entityVal <$> mTree
+                , snapshotPackageHackageCabal = mHackageCabalId
+                , snapshotPackageOrigin = origin
+                , snapshotPackageOriginUrl = "" -- TODO: add
+                , snapshotPackageSynopsis = getSynopsis gpd
+                , snapshotPackageReadme = Nothing -- TODO: find from Tree
+                , snapshotPackageChangelog = Nothing -- TODO: find from Tree
+                , snapshotPackageIsHidden = isHidden
+                , snapshotPackageFlags = flags
+                }
+    snapshotPackageId <- keyInsertBy snapshotPackage
+    -- TODO: collect all missing dependencies
+    _ <- insertDeps pid snapshotPackageId (extractDependencies compiler flags gpd)
     insertSnapshotPackageModules snapshotPackageId (getModuleNames gpd)
 
 
@@ -168,18 +170,18 @@ addDeprecated (Deprecation pname inFavourOfNameSet) = do
             "Package name: " <> display pname <> " from deprecation list was not found in Pantry."
 
 
-getHackageCabalRev0 ::
+getHackageCabalByRev0 ::
        MonadIO m
     => PackageIdentifierP
     -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId, Maybe TreeId))
-getHackageCabalRev0 pid = getHackageCabal pid Nothing
+getHackageCabalByRev0 pid = getHackageCabalByRev pid Nothing
 
-getHackageCabal ::
+getHackageCabalByRev ::
        MonadIO m
     => PackageIdentifierP
     -> Maybe Revision
     -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId, Maybe TreeId))
-getHackageCabal (PackageIdentifierP pname ver) mrev =
+getHackageCabalByRev (PackageIdentifierP pname ver) mrev =
     fmap (\(Value hcid, Value bid, Value mtid) -> (hcid, bid, mtid)) . listToMaybe <$>
     select
         (from $ \(hc `InnerJoin` pn `InnerJoin` v) -> do
@@ -190,6 +192,48 @@ getHackageCabal (PackageIdentifierP pname ver) mrev =
                   (v ^. VersionVersion ==. val ver) &&.
                   (hc ^. HackageCabalRevision ==. val (fromMaybe (Revision 0) mrev)))
              return (hc ^. HackageCabalId, hc ^. HackageCabalCabal, hc ^. HackageCabalTree))
+
+-- | This query will return `Nothing` if the tarball for the hackage cabal file hasn't been loaded
+-- yet.
+getHackageCabalByKey ::
+       MonadIO m
+    => PackageIdentifierP
+    -> BlobKey
+    -> ReaderT SqlBackend m (Maybe (HackageCabalId, Maybe TreeId))
+getHackageCabalByKey (PackageIdentifierP pname ver) (BlobKey sha size) =
+    fmap (\(Value hcid, Value mtid) -> (hcid, mtid)) . listToMaybe <$>
+    select
+        (from $ \(hc `InnerJoin` pn `InnerJoin` v `InnerJoin` b) -> do
+             on (hc ^. HackageCabalCabal ==. b ^. BlobId)
+             on (hc ^. HackageCabalVersion ==. v ^. VersionId)
+             on (hc ^. HackageCabalName ==. pn ^. PackageNameId)
+             where_
+                 ((pn ^. PackageNameName ==. val pname) &&.
+                  (v ^. VersionVersion ==. val ver) &&.
+                  (b ^. BlobSha ==. val sha) &&.
+                  (b ^. BlobSize ==. val size))
+             return (hc ^. HackageCabalId, hc ^. HackageCabalTree))
+
+-- getHackageCabalId ::
+--        MonadIO m
+--     => PackageIdentifierP
+--     -> BlobKey
+--     -> ReaderT SqlBackend m (Maybe HackageCabalId)
+-- getHackageCabalId (PackageIdentifierP pname ver) (BlobKey sha size) =
+--     fmap unValue . listToMaybe <$>
+--     select
+--         (from $ \(hc `InnerJoin` pn `InnerJoin` v `InnerJoin` b) -> do
+--              on (hc ^. HackageCabalCabal ==. b ^. BlobId)
+--              on (hc ^. HackageCabalVersion ==. v ^. VersionId)
+--              on (hc ^. HackageCabalName ==. pn ^. PackageNameId)
+--              where_
+--                  ((pn ^. PackageNameName ==. val pname) &&.
+--                   (v ^. VersionVersion ==. val ver) &&.
+--                   (b ^. BlobSha ==. val sha) &&.
+--                   (b ^. BlobSize ==. val size))
+--              return (hc ^. HackageCabalId))
+
+
 
 
 getSnapshotPackageId ::
@@ -213,27 +257,36 @@ getSnapshotPackageId snapshotId (PackageIdentifierP pname ver) =
 -- | Add all modules available for the package in a particular snapshot. Initially they are marked
 -- as without available documentation.
 insertSnapshotPackageModules ::
-       GetStackageDatabase env m => SnapshotPackageId -> [ModuleNameP] -> m ()
+       MonadIO m => SnapshotPackageId -> [ModuleNameP] -> ReaderT SqlBackend m ()
 insertSnapshotPackageModules snapshotPackageId =
     mapM_ $ \modName -> do
         moduleId <- insertModuleSafe modName
-        void $ run $ P.insertBy (SnapshotPackageModule snapshotPackageId moduleId False)
+        void $ P.insertBy (SnapshotPackageModule snapshotPackageId moduleId False)
 
 -- | Idempotent and thread safe way of adding a new module.
-insertModuleSafe :: GetStackageDatabase env m => ModuleNameP -> m ModuleId
+insertModuleSafe :: MonadIO m => ModuleNameP -> ReaderT SqlBackend m ModuleId
 insertModuleSafe modName = do
-    eExc <- tryAny $ run $ P.insert_ $ Module modName
+    rawExecute "INSERT INTO module(name) VALUES (?) ON CONFLICT DO NOTHING" [toPersistValue modName]
     mModId <-
-        run
-            (select
-                 (from $ \m -> do
-                      where_ (m ^. ModuleName ==. val modName)
-                      return (m ^. ModuleId)))
+        select
+            (from $ \m -> do
+                 where_ (m ^. ModuleName ==. val modName)
+                 return (m ^. ModuleId))
     case mModId of
         [Value modId] -> return modId
-        _
-            | Left exc <- eExc -> throwM exc
         _ -> error $ "Module name: " ++ show modName ++ " should have been inserted by now"
+    -- eExc <- tryAny $ run $ P.insert_ $ Module modName
+    -- mModId <-
+    --     run
+    --         (select
+    --              (from $ \m -> do
+    --                   where_ (m ^. ModuleName ==. val modName)
+    --                   return (m ^. ModuleId)))
+    -- case mModId of
+    --     [Value modId] -> return modId
+    --     _
+    --         | Left exc <- eExc -> throwM exc
+    --     _ -> error $ "Module name: " ++ show modName ++ " should have been inserted by now"
 
 
 markModuleHasDocs ::

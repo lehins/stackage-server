@@ -63,8 +63,6 @@ import           Stackage.Database.Query
 import           Stackage.Database.Schema
 import           Stackage.Database.Types
 import           System.Environment              (getEnv)
-import           Types
-import           UnliftIO.Async                  (pooledMapConcurrently)
 import           UnliftIO.Concurrent             (getNumCapabilities)
 import           Web.PathPieces                  (fromPathPiece, toPathPiece)
 
@@ -237,7 +235,7 @@ makeCorePackageGetters = do
 makeCorePackageGetter ::
        CompilerP -> PackageNameP -> VersionP -> RIO StackageCron (Maybe CorePackageGetter)
 makeCorePackageGetter _compiler pname ver = do
-    run (getHackageCabalRev0 pid) >>= \case
+    run (getHackageCabalByRev0 pid) >>= \case
         Nothing -> do
             logError $
                 "Core package from global-hints: '" <> display pid <> "' was not found in pantry."
@@ -273,7 +271,7 @@ makeCorePackageGetter _compiler pname ver = do
         PackageIdentifierRevision (unPackageNameP pname) (unVersionP ver) (CFIRevision (Revision 0))
 
 
--- TODO: for now it is only from hackage, PantryPackage needs an update
+-- TODO: for now it is only from hackage, PantryPackage needs an update to use other origins
 addPantryPackage ::
        SnapshotId -> CompilerP -> Bool -> Map FlagNameP Bool -> PantryPackage -> RIO StackageCron Bool
 addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
@@ -290,25 +288,31 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
                     case IntMap.lookup (blobKeyToInt treeCabal) cacheMap of
                         Just gpd -> pure gpd
                         Nothing ->
-                            run (loadBlobById treeCabal) >>=
+                            loadBlobById treeCabal >>=
                             updateCacheGPD (blobKeyToInt treeCabal) . parseCabalBlob
-    let onGPD mtid mgpd = do
-            run (getTreeForKey treeKey) >>= \case
-                mTree@(Just (Entity treeId Tree {treeName, treeVersion, treeCabal}))
-                    | maybe True (== treeId) mtid -> do
-                        mhcid <-
-                            fmap entityKey <$>
-                            run (getBy (UniqueHackage treeName treeVersion (Revision 0)))
-                        gpd <- getCachedGPD treeCabal mgpd
-                        addSnapshotPackage sid compiler Hackage mTree mhcid isHidden flags pid gpd
-                        writeIORef hasAddedPackageRef True
-                _ -> logError $ "Unexpected problem loading the tree for " <> display pid
-    _pkg <-
-        getHackageTarballOnGPD
-            (\treeId gpd -> onGPD (Just treeId) (Just gpd))
-            (toPackageIdentifierRevision pc)
-            (Just treeKey)
-    unlessM (readIORef hasAddedPackageRef) $ onGPD Nothing Nothing
+    let storeHackageSnapshotPackage hcid mtid mgpd = do
+            getTreeForKey treeKey >>= \case
+                (Just (Entity treeId _))
+                    | Just tid <- mtid
+                    , tid /= treeId ->
+                        lift $ logError $ "Pantry Tree Key mismatch for: " <> display pc
+                mTree@(Just (Entity _ Tree {treeCabal})) -> do
+                    gpd <- getCachedGPD treeCabal mgpd
+                    addSnapshotPackage sid compiler Hackage mTree (Just hcid) isHidden flags pid gpd
+                    writeIORef hasAddedPackageRef True
+                _ -> lift $ logError $ "Pantry is missing the source tree for " <> display pc
+    mHackageCabalInfo <- run $ getHackageCabalByKey pid (pcCabalKey pc)
+    case mHackageCabalInfo of
+        Nothing -> logError $ "Could not find the cabal file for: " <> display pc
+        Just (hcid, Nothing) -> do
+            void $
+                getHackageTarballOnGPD
+                    (\treeId gpd -> run $ storeHackageSnapshotPackage hcid (Just treeId) (Just gpd))
+                    (toPackageIdentifierRevision pc)
+                    (Just treeKey)
+            unlessM (readIORef hasAddedPackageRef) $
+                run $ storeHackageSnapshotPackage hcid Nothing Nothing
+        Just (hcid, mtid) -> run $ storeHackageSnapshotPackage hcid mtid Nothing
     readIORef hasAddedPackageRef
   where
     pid = PackageIdentifierP (pcPackageName pc) (pcPackageVersion pc)
@@ -328,8 +332,7 @@ checkForDocs snapshotId snapName = do
         concatMapC pathToPackageModule .|
         sinkList
     sidsCacheRef <- newIORef Map.empty
-    connCount <- pcConnectionCount <$> view pantryConfigL
-    notFoundList <- lift $ pooledMapConcurrentlyN connCount (markModules sidsCacheRef) mods
+    notFoundList <- lift $ pooledMapConcurrently (markModules sidsCacheRef) mods
     --(_, notFoundSet) <- lift $ foldM markModules (Map.empty, Set.empty) mods
     forM_ (Set.fromList $ catMaybes notFoundList) $ \pid ->
         lift $
@@ -496,7 +499,7 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
         Just compilerCorePackages ->
             forM_ compilerCorePackages $ \getCorePackageInfo -> do
                 (mTree, mhcid, pid, gpd) <- getCorePackageInfo
-                addSnapshotPackage snapshotId sfCompiler Core mTree mhcid False mempty pid gpd
+                run $ addSnapshotPackage snapshotId sfCompiler Core mTree mhcid False mempty pid gpd
     loadedPackageCountRef <- newIORef (0 :: Int)
     let totalPackages = length sfPackages
         progressReporter =
@@ -516,12 +519,25 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
             curSucc <- addPantryPackage snapshotId sfCompiler isHidden flags pp
             atomicModifyIORef' loadedPackageCountRef (\c -> (c + 1, ()))
             pure curSucc
-    -- leave off one thread for the doc downloader
-    connCount <- max 1 . subtract 1 . pcConnectionCount <$> view pantryConfigL
+    -- adjust for hyperthreading and leave some cores for doc loader
+    connCount <- max 1 . (`div` 2) . pcConnectionCount <$> view pantryConfigL
+    before <- getCurrentTime
     ePantryUpdatesSucceeded <-
         race progressReporter $
         pooledMapConcurrentlyN connCount addPantryPackageWithReport sfPackages
-    logSticky $ "Loading snapshot '" <> display sfName <> "' is done. Next are the docs..."
+    after <- getCurrentTime
+    let (mins, secs) = round (diffUTCTime after before) `quotRem` (60 :: Int)
+    logInfo $
+        mconcat
+            [ "Loading snapshot '"
+            , display sfName
+            , "' was done (in "
+            , displayShow mins
+            , "min "
+            , displayShow secs
+            , "sec). There are still docs."
+            ]
+    logSticky "Still loading the docs for previous snapshot ..."
     let pantryUpdateSucceeded = either (const False) and ePantryUpdatesSucceeded
     return $ do
         checkForDocsSucceeded <-

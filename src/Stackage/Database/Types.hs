@@ -10,6 +10,7 @@ module Stackage.Database.Types
     , FlagNameP(..)
     , StackageCron(..)
     , PantryCabal(..)
+    , BlobKey (..)
     , GenericPackageDescription
     , toPackageIdentifierRevision
     , PantryPackage(..)
@@ -35,7 +36,7 @@ import           Data.Text.Read       (decimal)
 import           Database.Persist     (PersistField(..), SqlType(SqlInt64))
 import           Database.Persist.Sql (PersistFieldSql(..))
 import           Network.AWS          (Env, HasEnv (..))
-import           Pantry.SHA256        (fromHexText)
+import           Pantry.SHA256        (SHA256, fromHexText)
 import           Pantry.Storage       (BlobId, HackageCabalId, TreeId)
 import           Pantry.Types         (BlobKey (..), CabalFileInfo (..),
                                        FileSize (..), HasPantryConfig (..),

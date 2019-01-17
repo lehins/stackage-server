@@ -45,7 +45,6 @@ import qualified Data.Aeson                  as A
 import           Data.Pool                   (destroyAllResources)
 import           Database.Persist
 import           Database.Persist.Postgresql
-import           Database.Persist.Sql        (IsolationLevel (..))
 import           Database.Persist.TH
 import           Pantry.Storage              as PS (BlobId, unBlobKey,
                                                     HackageCabalId,
