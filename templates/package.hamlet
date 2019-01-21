@@ -38,11 +38,12 @@ $newline never
                    <td>
                      <span .version>
                        <a href=@{SnapshotR (liSnapName li) (StackageSdistR (PNVName pname))}>#{liVersionRev li}
-              <tr>
-                <td align="right">Latest on Hackage:
-                <td>
-                  <a href="https://hackage.haskell.org/package/#{PackageIdentifierP pname (hciVersion hackageLatest)}">
-                    <span .version>#{hackageVersionRev}
+              $maybe (pid, verRev) <- mhackageLatest
+                  <tr>
+                    <td align="right">Latest on Hackage:
+                    <td>
+                      <a href="https://hackage.haskell.org/package/#{pid}">
+                        <span .version>#{verRev}
 
             $if isNothing mSnapName
                 <p .add-to-nightly>

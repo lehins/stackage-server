@@ -1,7 +1,6 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 module Foundation where
 
-import           RIO (to)
 import           ClassyPrelude.Yesod
 import           Data.WebsiteContent
 import           Settings

@@ -360,17 +360,6 @@ checkForDocs snapshotId snapName = do
                         (\cacheMap -> (Map.insert pid snapshotPackageId cacheMap, ()))
                     pure Nothing
             _ -> pure Nothing
-    -- markModules (snapshotPackageIds, notFoundSet) (pid, modName) = do
-    --     let mSnapshotPackageId = Map.lookup pid snapshotPackageIds
-    --     mFound <- run $ markModuleHasDocs snapshotId pid mSnapshotPackageId modName
-    --     pure $
-    --         case mFound of
-    --             Nothing -> (snapshotPackageIds, Set.insert pid notFoundSet)
-    --             Just snapshotPackageId
-    --                 | Nothing <- mSnapshotPackageId ->
-    --                     (Map.insert pid snapshotPackageId snapshotPackageIds, notFoundSet)
-    --             _ -> (snapshotPackageIds, notFoundSet)
-
 
 
 sourceSnapshots ::

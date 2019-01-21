@@ -36,8 +36,9 @@ import           Yesod.Core.Types (loggerSet)
 import           Yesod.Default.Config2
 import           Yesod.Default.Handlers
 import           Yesod.GitRepo
+import Database.Persist.Postgresql (PostgresConf(..))
 import           System.Process (rawSystem)
-import           Stackage.Database (openStackageDatabase, PostgresConf (..))
+import           Stackage.Database (openStackageDatabase)
 import           Stackage.Database.Cron (newHoogleLocker, singleRun)
 import           Stackage.Database.Github (getStackageContentDir)
 import           Control.AutoUpdate

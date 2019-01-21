@@ -7,7 +7,7 @@ module Handler.Haddock
 import Import
 import qualified Data.Text as T (takeEnd)
 import Stackage.Database
-import Stackage.Database.Types (HackageCabalInfo(..), haddockBucketName)
+import Stackage.Database.Types (haddockBucketName)
 
 makeURL :: SnapName -> [Text] -> Text
 makeURL snapName rest = concat
@@ -125,15 +125,15 @@ redirectWithVersion ::
 redirectWithVersion snapName rest =
     case rest of
         [pkg, file] | Just pname <- fromPathPiece pkg -> do
-            mhci <- getVersionForSnapshot snapName pname
-            case mhci of -- TODO: Should `Nothing` cause a 404 here, since haddock will fail?
+            mspi <- getSnapshotPackageInfo snapName pname
+            case mspi of -- TODO: Should `Nothing` cause a 404 here, since haddock will fail?
                 Nothing -> return Nothing -- error "That package is not part of this snapshot."
-                Just hci -> do
+                Just spi -> do
                     return
                         (Just
                              (HaddockR
                                   snapName
-                                  [toPathPiece $ PackageIdentifierP pname (hciVersion hci), file]))
+                                  [toPathPiece $ PackageIdentifierP pname (spiVersion spi), file]))
         _ -> return Nothing
 
 getHaddockBackupR :: [Text] -> Handler ()

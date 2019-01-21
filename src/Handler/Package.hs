@@ -9,7 +9,6 @@ module Handler.Package
     , packagePage
     , getPackageBadgeR
     , renderNoPackages
-    , deduceHackageCabalInfo
     ) where
 
 import           Data.Char
@@ -71,81 +70,63 @@ checkSpam pname inner = do
         $(widgetFile "spam-package")
       else inner
 
-deduceHackageCabalInfo ::
-       (GetStackageDatabase env m, MonadHandler m)
-    => Maybe (SnapName, HackageCabalInfo)
-    -> PackageNameP
-    -> m (Maybe SnapName, HackageCabalInfo, HackageCabalInfo)
-deduceHackageCabalInfo mSnapCabal pname = do
-    hackageLatest <- getHackageLatestVersion pname >>= maybe notFound return
-    (mSnapName, hci) <- case mSnapCabal of
-      Just (snapName, hci) -> return (Just snapName, hci)
-      Nothing -> maybe (Nothing, hackageLatest) (first Just) <$> getSnapshotLatestVersion pname
-    return (mSnapName, hci, hackageLatest)
-
-packagePage :: Maybe (SnapName, HackageCabalInfo)
+packagePage :: Maybe (SnapshotPackageInfo)
             -> PackageNameP
             -> Handler Html
-packagePage mSnapCabal pname =
+packagePage mspi pname =
     track "Handler.Package.packagePage" $
     checkSpam pname $ do
-        (isDeprecated, inFavourOf) <- getDeprecated pname
-        latests <- getLatests pname
-        -- short circuit in case when we don't know about a package with such name on hackage
-        -- TODO: once other origins for packages are implemented this is no longer valid
-        hackageLatest <- getHackageLatestVersion pname >>= maybe notFound return
-        (mSnapName, hci) <-
-            case mSnapCabal of
-                Just (snapName, hci) -> return (Just snapName, hci)
-                Nothing ->
-                    maybe (Nothing, hackageLatest) (first Just) <$> getSnapshotLatestVersion pname
-        -- When package is present in a snapshot, also pullout modules that have documentaion available
-        (PackageInfo {..}, packageModules) <- getPackageInfo hci mSnapName
-        (deps, depsCount, revDeps, revDepsCount) <-
+        maybe (getSnapshotLatestVersion pname) (return . Just) mspi >>= \case
+          Nothing -> notFound -- getHackageLatestVersion pname >>= maybe notFound return
+          Just spi -> handleSnapshotPackage spi
+
+handleSnapshotPackage :: SnapshotPackageInfo -> Handler Html
+handleSnapshotPackage spi = do
+    (isDeprecated, inFavourOf) <- getDeprecated pname
+    latests <- getLatests pname
+    (PackageInfo {..}, packageModules) <- getPackageInfo spi
+    deps <- map (first unPackageRev) <$> getForwardDeps spi (Just maxDisplayedDeps)
+    revDeps <- map (first unPackageRev) <$> getReverseDeps spi (Just maxDisplayedDeps)
+    (depsCount, revDepsCount) <- getDepsCount spi
+    mhackageLatest <-
+        case spiHackageCabalInfo spi of
+            Just _ -> do
+                hciLatest <- getHackageLatestVersion pname >>= maybe notFound pure
+                let verRev = hciVersionRev hciLatest
+                pure $ Just (PackageIdentifierP pname (vrVersion verRev), verRev)
+            Nothing -> pure Nothing
+    let mdocs = Just (spiSnapName spi, piVersion, packageModules)
+        mSnapName = Just $ spiSnapName spi
+        mdisplayedVersion = Just $ spiVersionRev spi
+        (packageDepsLink, packageRevDepsLink) =
             case mSnapName of
-                Nothing -> return ([], 0, [], 0)
-                Just snapName -> do
-                    deps <- getForwardHackageDeps snapName (hciCabalId hci) $ Just maxDisplayedDeps
-                    revDeps <- getReverseHackageDeps snapName (hciCabalId hci) (Just maxDisplayedDeps)
-                    (depsCount, revDepsCount) <- getHackageDepsCount snapName (hciCabalId hci)
-                    return
-                        ( map (first unPackageRev) deps
-                        , depsCount
-                        , map (first unPackageRev) revDeps
-                        , revDepsCount)
-        let mdocs = (, piVersion, packageModules) <$> mSnapName
-            hackageVersionRev = VersionRev (hciVersion hackageLatest) (hciRevision hackageLatest)
-            -- TODO: remove conditional and add pantry key and size
-            mdisplayedVersion =
-                guard (hci /= hackageLatest) >> Just (VersionRev (hciVersion hci) (hciRevision hci))
-            (packageDepsLink, packageRevDepsLink) =
-                case mSnapName of
-                    Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
-                    Just snap ->
-                        let wrap f = SnapshotR snap $ f $ PNVNameVersion pname (hciVersion hci)
-                         in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
-        let mhomepage =
-                case T.strip (piHomepage) of
-                    x
-                        | null x -> Nothing
-                        | otherwise -> Just x
-            authors = enumerate (parseIdentitiesLiberally piAuthor)
-            maintainers =
-                let ms = enumerate (parseIdentitiesLiberally piMaintainer)
-                 in if ms == authors
-                        then []
-                        else ms
-        defaultLayout $ do
-            setTitle $ toHtml piName
-            $(combineScripts 'StaticR [js_highlight_js])
-            $(combineStylesheets 'StaticR [css_font_awesome_min_css, css_highlight_github_css])
-            let hoogleForm name =
-                    let exact = False
-                        mPackageName = Just pname
-                        queryText = "" :: Text
-                     in $(widgetFile "hoogle-form")
-            $(widgetFile "package")
+                Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
+                Just snap ->
+                    let wrap f = SnapshotR snap $ f $ PNVNameVersion pname (spiVersion spi)
+                     in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
+    let mhomepage =
+            case T.strip (piHomepage) of
+                x
+                    | null x -> Nothing
+                    | otherwise -> Just x
+        authors = enumerate (parseIdentitiesLiberally piAuthor)
+        maintainers =
+            let ms = enumerate (parseIdentitiesLiberally piMaintainer)
+             in if ms == authors
+                    then []
+                    else ms
+    defaultLayout $ do
+        setTitle $ toHtml piName
+        $(combineScripts 'StaticR [js_highlight_js])
+        $(combineStylesheets 'StaticR [css_font_awesome_min_css, css_highlight_github_css])
+        let hoogleForm name =
+                let exact = False
+                    mPackageName = Just pname
+                    queryText = "" :: Text
+                 in $(widgetFile "hoogle-form")
+        $(widgetFile "package")
   where
+    pname = spiPackageName spi
     unPackageRev (PackageVersionRev pname' _) = pname'
     enumerate = zip [0 :: Int ..]
     renderModules sname packageIdentifier = renderForest [] . moduleForest . coerce

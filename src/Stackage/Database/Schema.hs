@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GADTs                      #-}
@@ -46,18 +47,19 @@ import           Data.Pool                   (destroyAllResources)
 import           Database.Persist
 import           Database.Persist.Postgresql
 import           Database.Persist.TH
-import           Pantry.Storage              as PS (BlobId, unBlobKey,
-                                                    HackageCabalId,
+import           Pantry.Storage              as PS (BlobId, HackageCabalId,
                                                     PackageNameId, Tree (..),
                                                     TreeEntry (..), TreeEntryId,
                                                     TreeId, Unique (..),
-                                                    VersionId)
+                                                    VersionId, unBlobKey)
 import qualified Pantry.Storage              as Pantry (migrateAll)
 import           Pantry.Types                (HasPantryConfig (..),
                                               PantryConfig (..), Storage (..))
 import           RIO
 import           RIO.Time
-import           Stackage.Database.Types
+import           Types                       (CompilerP (..), FlagNameP,
+                                              ModuleNameP, PackageOrigin,
+                                              SnapName, VersionRangeP)
 
 currentSchema :: Int
 currentSchema = 1
@@ -144,7 +146,6 @@ instance HasPantryConfig env => GetStackageDatabase env (RIO env) where
 run :: GetStackageDatabase env m => SqlPersistT m a -> m a
 run inner = do
     Storage pool <- getStackageDatabase
-    --runSqlPoolWithIsolation inner pool Serializable
     runSqlPool inner pool
 
 
@@ -161,7 +162,7 @@ closeStackageDatabase = do
     liftIO $ destroyAllResources pool
 
 
-getSchema :: RIO StackageCron (Maybe Int)
+getSchema :: (HasLogFunc env, GetStackageDatabase env (RIO env)) => RIO env (Maybe Int)
 getSchema =
     run $ do
         eres <- tryAny (selectList [] [])
@@ -170,7 +171,7 @@ getSchema =
             Right [Entity _ (Schema v)] -> return $ Just v
             _                           -> return Nothing
 
-runStackageMigrations :: RIO StackageCron ()
+runStackageMigrations :: (HasLogFunc env, GetStackageDatabase env (RIO env)) => RIO env ()
 runStackageMigrations = do
     actualSchema <- getSchema
     run $ do

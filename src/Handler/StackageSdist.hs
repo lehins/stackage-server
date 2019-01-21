@@ -1,12 +1,12 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 module Handler.StackageSdist
     ( getStackageSdistR
-    , pnvToHackageCabalInfo
+    , pnvToSnapshotPackageInfo
     ) where
 
 import Import
 import Stackage.Database
-import Stackage.Database.Types (HackageCabalInfo(..))
+import Stackage.Database.Types (SnapshotPackageInfo(..))
 import Handler.Package (packagePage)
 
 handlePNVTarball :: PackageNameP -> VersionP -> Handler TypedContent
@@ -26,28 +26,28 @@ getStackageSdistR
   :: SnapName -> PackageNameVersion -> HandlerFor App TypedContent
 getStackageSdistR sname pnv =
     track "Handler.StackageSdist.getStackageSdistR" $ do
-        pnvToHackageCabalInfo sname pnv handlePNVTarball $ \isSameVersion hci ->
+        pnvToSnapshotPackageInfo sname pnv handlePNVTarball $ \isSameVersion spi ->
             if isSameVersion
-                then packagePage (Just (sname, hci)) (hciPackageName hci) >>= sendResponse
+                then packagePage (Just spi) (spiPackageName spi) >>= sendResponse
                 else redirect $
                      SnapshotR sname $
-                     StackageSdistR $ PNVNameVersion (hciPackageName hci) (hciVersion hci)
+                     StackageSdistR $ PNVNameVersion (spiPackageName spi) (spiVersion spi)
 
 
-pnvToHackageCabalInfo ::
+pnvToSnapshotPackageInfo ::
        SnapName
     -> PackageNameVersion
     -> (PackageNameP -> VersionP -> HandlerFor App b)
-    -> (Bool -> HackageCabalInfo -> HandlerFor App b)
+    -> (Bool -> SnapshotPackageInfo -> HandlerFor App b)
     -> HandlerFor App b
-pnvToHackageCabalInfo sname pnv tarballHandler hciHandler =
+pnvToSnapshotPackageInfo sname pnv tarballHandler spiHandler =
     case pnv of
-        PNVName pname -> hciHelper sname pname >>= hciHandler False
+        PNVName pname -> spiHelper sname pname >>= spiHandler False
         PNVNameVersion pname version ->
-            hciHelper sname pname >>= \hci -> hciHandler (version == hciVersion hci) hci
+            spiHelper sname pname >>= \spi -> spiHandler (version == spiVersion spi) spi
         PNVTarball name version -> tarballHandler name version
 
 
-hciHelper :: SnapName -> PackageNameP -> Handler HackageCabalInfo
-hciHelper sname pname = getVersionForSnapshot sname pname >>= maybe notFound return
+spiHelper :: SnapName -> PackageNameP -> Handler SnapshotPackageInfo
+spiHelper sname pname = getSnapshotPackageInfo sname pname >>= maybe notFound return
 

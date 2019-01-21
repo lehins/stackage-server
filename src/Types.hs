@@ -2,12 +2,19 @@
 {-# LANGUAGE CPP                        #-}
 {-# LANGUAGE DeriveDataTypeable         #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE NoImplicitPrelude          #-}
+{-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE ViewPatterns               #-}
 module Types
-    ( SnapshotBranch(..)
+    ( SnapName (..)
+    , isLts
+    , isNightly
+    , SnapshotBranch(..)
+    , snapshotPrettyName
+    , snapshotPrettyNameShort
     , PackageNameP(..)
     , VersionP(..)
     , Revision(..)
@@ -33,6 +40,7 @@ module Types
     , SupportedArch(..)
     , Year
     , Month(Month)
+    , PackageOrigin(..)
     ) where
 
 import           ClassyPrelude.Yesod                  (ToBuilder (..))
@@ -40,8 +48,7 @@ import           Control.Monad.Catch                  (MonadThrow, throwM)
 import           Data.Aeson
 import           Data.Bifunctor                       (bimap)
 import           Data.Char                            (ord)
-import           Data.Hashable                        (hashUsing)
-import           Data.Hashable
+import           Data.Hashable                        (hashUsing, hashWithSalt)
 import qualified Data.Text                            as T
 import qualified Data.Text.Read                       as Reader
 import           Data.Typeable
@@ -59,9 +66,10 @@ import qualified Distribution.Text                    as DT (Text, display,
 import           Distribution.Types.VersionRange      (VersionRange)
 import           Distribution.Version                 (mkVersion,
                                                        versionNumbers)
-import           Pantry.Types
+import           Pantry.Types                         hiding (Archive)
 import           RIO
 import qualified RIO.Map                              as Map
+import           RIO.Time                             (Day)
 import           Text.Blaze                           (ToMarkup (..))
 import           Web.PathPieces
 
@@ -82,6 +90,72 @@ dtParse txt =
 dtDisplay :: (DT.Text a, IsString b) => a -> b
 dtDisplay = fromString . DT.display
 
+
+
+data SnapName = SNLts !Int !Int
+              | SNNightly !Day
+    deriving (Eq, Ord, Read, Show)
+
+isLts :: SnapName -> Bool
+isLts SNLts{}     = True
+isLts SNNightly{} = False
+
+isNightly :: SnapName -> Bool
+isNightly SNLts{}     = False
+isNightly SNNightly{} = True
+
+
+snapshotPrettyName :: SnapName -> CompilerP -> Text
+snapshotPrettyName sName sCompiler =
+    T.concat [snapshotPrettyNameShort sName, " (", textDisplay sCompiler, ")"]
+
+snapshotPrettyNameShort :: SnapName -> Text
+snapshotPrettyNameShort name =
+    case name of
+        SNLts x y -> T.concat ["LTS Haskell ", T.pack (show x), ".", T.pack (show y)]
+        SNNightly d -> "Stackage Nightly " <> T.pack (show d)
+
+
+instance ToJSONKey SnapName
+
+instance ToJSON SnapName where
+    toJSON = String . toPathPiece
+
+instance PersistField SnapName where
+    toPersistValue = toPersistValue . toPathPiece
+    fromPersistValue v = do
+        t <- fromPersistValue v
+        case fromPathPiece t of
+            Nothing -> Left $ "Invalid SnapName: " <> t
+            Just x  -> return x
+instance PersistFieldSql SnapName where
+    sqlType = sqlType . fmap toPathPiece
+instance PathPiece SnapName where
+    toPathPiece = textDisplay
+    fromPathPiece = parseSnapName
+
+instance FromJSON SnapName where
+    parseJSON = withText "SnapName" (maybe (fail "Can't parse snapshot name") pure . parseSnapName)
+
+instance ToMarkup SnapName where
+    toMarkup = toMarkup . textDisplay
+
+instance Display SnapName where
+    display =
+        \case
+            (SNLts x y) -> mconcat ["lts-", displayShow x, ".", displayShow y]
+            (SNNightly d) -> "nightly-" <> displayShow d
+
+parseSnapName :: Text -> Maybe SnapName
+parseSnapName t0 = nightly <|> lts
+  where
+    nightly = fmap SNNightly $ T.stripPrefix "nightly-" t0 >>= (readMaybe . T.unpack)
+    lts = do
+        t1 <- T.stripPrefix "lts-" t0
+        Right (x, t2) <- Just $ Reader.decimal t1
+        t3 <- T.stripPrefix "." t2
+        Right (y, "") <- Just $ Reader.decimal t3
+        return $ SNLts x y
 
 data SnapshotBranch = LtsMajorBranch Int
                     | LtsBranch
@@ -156,7 +230,10 @@ keepMajorVersion pver@(VersionP ver) =
 instance ToMarkup Revision where
     toMarkup (Revision r) = "rev:" <> toMarkup r
 
-data VersionRev = VersionRev !VersionP !(Maybe Revision) deriving (Eq, Show)
+data VersionRev = VersionRev
+    { vrVersion :: !VersionP
+    , vrRevision :: !(Maybe Revision)
+    } deriving (Eq, Show)
 
 instance ToMarkup VersionRev where
     toMarkup (VersionRev version mrev) =
@@ -387,3 +464,33 @@ instance FromJSONKey FlagNameP where
 
 parseFlagNameP :: Text -> Either String FlagNameP
 parseFlagNameP = bimap displayException FlagNameP . dtParse
+
+
+data PackageOrigin
+    = Core
+    | Hackage
+    | Archive
+    | GitRepo
+    | HgRepo
+    deriving (Show, Eq)
+
+
+instance PersistField PackageOrigin where
+    toPersistValue =
+        toPersistValue . \case
+            Core    -> 0 :: Int64
+            Hackage -> 1
+            Archive -> 2
+            GitRepo -> 3
+            HgRepo  -> 4
+    fromPersistValue v =
+        fromPersistValue v >>= \case
+            0 -> Right Core
+            1 -> Right Hackage
+            2 -> Right Archive
+            3 -> Right GitRepo
+            4 -> Right HgRepo
+            n -> Left $ "Unknown origin type: " <> textDisplay (n :: Int64)
+instance PersistFieldSql PackageOrigin where
+    sqlType _ = SqlInt64
+

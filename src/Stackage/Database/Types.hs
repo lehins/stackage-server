@@ -3,9 +3,12 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Stackage.Database.Types
-    ( SnapName (..)
+    ( SnapName(..)
     , isLts
     , isNightly
+    , SnapshotBranch(..)
+    , snapshotPrettyName
+    , snapshotPrettyNameShort
     , CompilerP(..)
     , FlagNameP(..)
     , StackageCron(..)
@@ -15,6 +18,8 @@ module Stackage.Database.Types
     , toPackageIdentifierRevision
     , PantryPackage(..)
     , SnapshotFile(..)
+    , SnapshotPackageInfo(..)
+    , spiVersionRev
     , HackageCabalInfo(..)
     , PackageListingInfo(..)
     , ModuleListingInfo(..)
@@ -23,6 +28,8 @@ module Stackage.Database.Types
     , Revision(..)
     , VersionRangeP(..)
     , PackageIdentifierP(..)
+    , VersionRev(..)
+    , PackageVersionRev(..)
     , ModuleNameP(..)
     , PackageOrigin(..)
     , LatestInfo(..)
@@ -31,80 +38,25 @@ module Stackage.Database.Types
     ) where
 
 import           Data.Aeson
-import qualified Data.Text            as T
-import           Data.Text.Read       (decimal)
-import           Database.Persist     (PersistField(..), SqlType(SqlInt64))
-import           Database.Persist.Sql (PersistFieldSql(..))
-import           Network.AWS          (Env, HasEnv (..))
-import           Pantry.SHA256        (SHA256, fromHexText)
-import           Pantry.Storage       (BlobId, HackageCabalId, TreeId)
-import           Pantry.Types         (BlobKey (..), CabalFileInfo (..),
-                                       FileSize (..), HasPantryConfig (..),
-                                       PackageIdentifierRevision (..),
-                                       PackageNameP (..), PantryConfig,
-                                       TreeKey (..), VersionP (..))
+import qualified Data.Text                as T
+import           Data.Text.Read           (decimal)
+import           Network.AWS              (Env, HasEnv (..))
+import           Pantry.SHA256            (fromHexText)
+import           Pantry.Storage           (BlobId, HackageCabalId)
+import           Pantry.Types             (BlobKey (..), CabalFileInfo (..),
+                                           FileSize (..), HasPantryConfig (..),
+                                           PackageIdentifierRevision (..),
+                                           PackageNameP (..), PantryConfig,
+                                           TreeKey (..), VersionP (..))
 import           RIO
-import           RIO.Process          (HasProcessContext (..), ProcessContext)
-import           RIO.Time             (Day)
-import           Text.Blaze           (ToMarkup (..))
+import           RIO.Process              (HasProcessContext (..),
+                                           ProcessContext)
+import           RIO.Time                 (Day)
+import           Stackage.Database.Schema
 import           Types
-import           Web.PathPieces
 
 haddockBucketName :: Text
 haddockBucketName = "haddock.stackage.org"
-
-data SnapName = SNLts !Int !Int
-              | SNNightly !Day
-    deriving (Eq, Ord, Read, Show)
-
-isLts :: SnapName -> Bool
-isLts SNLts{}     = True
-isLts SNNightly{} = False
-
-isNightly :: SnapName -> Bool
-isNightly SNLts{}     = False
-isNightly SNNightly{} = True
-
-instance ToJSONKey SnapName
-
-instance ToJSON SnapName where
-    toJSON = String . toPathPiece
-
-instance PersistField SnapName where
-    toPersistValue = toPersistValue . toPathPiece
-    fromPersistValue v = do
-        t <- fromPersistValue v
-        case fromPathPiece t of
-            Nothing -> Left $ "Invalid SnapName: " <> t
-            Just x  -> return x
-instance PersistFieldSql SnapName where
-    sqlType = sqlType . fmap toPathPiece
-instance PathPiece SnapName where
-    toPathPiece = textDisplay
-    fromPathPiece = parseSnapName
-
-instance FromJSON SnapName where
-    parseJSON = withText "SnapName" (maybe (fail "Can't parse snapshot name") pure . parseSnapName)
-
-instance ToMarkup SnapName where
-    toMarkup = toMarkup . textDisplay
-
-instance Display SnapName where
-    display =
-        \case
-            (SNLts x y) -> mconcat ["lts-", displayShow x, ".", displayShow y]
-            (SNNightly d) -> "nightly-" <> displayShow d
-
-parseSnapName :: Text -> Maybe SnapName
-parseSnapName t0 = nightly <|> lts
-  where
-    nightly = fmap SNNightly $ T.stripPrefix "nightly-" t0 >>= (readMaybe . T.unpack)
-    lts = do
-        t1 <- T.stripPrefix "lts-" t0
-        Right (x, t2) <- Just $ decimal t1
-        t3 <- T.stripPrefix "." t2
-        Right (y, "") <- Just $ decimal t3
-        return $ SNLts x y
 
 
 data StackageCron = StackageCron
@@ -257,49 +209,24 @@ instance ToJSON PackageListingInfo where
 
 data HackageCabalInfo = HackageCabalInfo
     { hciCabalId     :: !HackageCabalId
-    , hciCabalBlobId :: !BlobId         -- TODO: make part of SnapshotPackageInfo
-    , hciPackageName :: !PackageNameP   -- TODO: make part of SnapshotPackageInfo
-    , hciVersion     :: !VersionP       -- TODO: make part of SnapshotPackageInfo
-    , hciRevision    :: !(Maybe Revision)
+    , hciCabalBlobId :: !BlobId
+    , hciPackageName :: !PackageNameP
+    , hciVersionRev  :: !VersionRev
     } deriving (Show, Eq)
-
-
-data PackageOrigin
-    = Core
-    | Hackage
-    | Archive
-    | GitRepo
-    | HgRepo
-    deriving (Show, Eq)
-
-
-instance PersistField PackageOrigin where
-    toPersistValue =
-        toPersistValue . \case
-            Core    -> 0 :: Int64
-            Hackage -> 1
-            Archive -> 2
-            GitRepo -> 3
-            HgRepo  -> 4
-    fromPersistValue v =
-        fromPersistValue v >>= \case
-            0 -> Right Core
-            1 -> Right Hackage
-            2 -> Right Archive
-            3 -> Right GitRepo
-            4 -> Right HgRepo
-            n -> Left $ "Unknown origin type: " <> textDisplay (n :: Int64)
-instance PersistFieldSql PackageOrigin where
-    sqlType _ = SqlInt64
-
 
 data SnapshotPackageInfo = SnapshotPackageInfo
-    { spiTreeId      :: !TreeId
-    , spiCabalBlobId :: !BlobId
-    , spiPackageName :: !PackageNameP
-    , spiVersion     :: !VersionP
-    , spiOrigin      :: !PackageOrigin
+    { spiSnapshotPackageId :: !SnapshotPackageId
+    , spiSnapshotId        :: !SnapshotId
+    , spiCabalBlobId       :: !(Maybe BlobId)
+    , spiSnapName          :: !SnapName
+    , spiPackageName       :: !PackageNameP
+    , spiVersion           :: !VersionP
+    , spiHackageCabalInfo  :: !(Maybe HackageCabalInfo)
     } deriving (Show, Eq)
+
+spiVersionRev :: SnapshotPackageInfo -> VersionRev
+spiVersionRev spi =
+    maybe (VersionRev (spiVersion spi) Nothing) hciVersionRev (spiHackageCabalInfo spi)
 
 data ModuleListingInfo = ModuleListingInfo
     { mliModuleName        :: !ModuleNameP
