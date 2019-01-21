@@ -152,7 +152,7 @@ getSnapshotPackagesR name = track "Handler.StackageHome.getSnapshotPackagesR" $
 getDocsR :: SnapName -> Handler Html
 getDocsR name = track "Handler.StackageHome.getDocsR" $ do
     Entity sid _ <- lookupSnapshot name >>= maybe notFound return
-    mlis <- getSnapshotModules sid True
+    mlis <- getSnapshotModules sid
     render <- getUrlRender
     let mliUrl mli = render $ haddockUrl name mli
     defaultLayout $ do

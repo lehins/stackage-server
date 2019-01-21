@@ -246,16 +246,43 @@ getSnapshots mBranch l o =
                     pure snapshot
 
 
-getSnapshotModules ::
-    GetStackageDatabase env m => SnapshotId -> Bool -> m [ModuleListingInfo]
-getSnapshotModules sid hasDoc = undefined
+getSnapshotModules :: GetStackageDatabase env m => SnapshotId -> m [ModuleListingInfo]
+getSnapshotModules sid =
+    run $ do
+        map toModuleListingInfo <$>
+            select
+                (from $ \(spm `InnerJoin` m `InnerJoin` sp `InnerJoin` pn `InnerJoin` v) -> do
+                     on $ sp ^. SnapshotPackageVersion ==. v ^. VersionId
+                     on $ sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId
+                     on $ spm ^. SnapshotPackageModuleSnapshotPackage ==. sp ^. SnapshotPackageId
+                     on $ spm ^. SnapshotPackageModuleModule ==. m ^. ModuleId
+                     where_ $
+                         (sp ^. SnapshotPackageSnapshot ==. val sid) &&.
+                         (spm ^. SnapshotPackageModuleHasDocs ==. val True)
+                     orderBy [asc (m ^. ModuleName), asc (pn ^. PackageNameName)]
+                     pure (m ^. ModuleName, pn ^. PackageNameName, v ^. VersionVersion))
+  where
+    toModuleListingInfo (Value moduleName, Value packageName, Value version) =
+        ModuleListingInfo
+            { mliModuleName = moduleName
+            , mliPackageIdentifier = PackageIdentifierP packageName version
+            }
 
 getSnapshotPackageModules
     :: MonadIO m
     => SnapshotPackageId
     -> Bool
     -> ReaderT SqlBackend m [ModuleNameP]
-getSnapshotPackageModules snapshotPackageId hasDocs = undefined
+getSnapshotPackageModules snapshotPackageId hasDocs =
+    map unValue <$>
+    select
+        (from $ \(spm `InnerJoin` m) -> do
+             on $ spm ^. SnapshotPackageModuleModule ==. m ^. ModuleId
+             where_ $
+                 (spm ^. SnapshotPackageModuleSnapshotPackage ==. val snapshotPackageId) &&.
+                 (spm ^. SnapshotPackageModuleHasDocs ==. val hasDocs)
+             orderBy [asc (m ^. ModuleName)]
+             pure (m ^. ModuleName))
 
 
 -- FIXME: list latest version with latest snapshot it is in
