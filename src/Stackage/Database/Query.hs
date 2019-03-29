@@ -85,29 +85,33 @@ import           Stackage.Database.Schema
 import           Stackage.Database.Types
 
 
-
+-- | Construct a pretty title for the snapshot
 snapshotTitle :: Snapshot -> Text
 snapshotTitle s = snapshotPrettyName (snapshotName s) (snapshotCompiler s)
 
-
+-- | Get the snapshot from the database.
 lookupSnapshot :: GetStackageDatabase env m => SnapName -> m (Maybe (Entity Snapshot))
 lookupSnapshot name = run $ getBy $ UniqueSnapshot name
 
-
+-- | A way to lookup a name of the newest snapshot per type: 'lts', 'lts-x' and 'nightly'. This is
+-- used for resolving a snapshot
 newestSnapshot :: GetStackageDatabase env m => SnapshotBranch -> m (Maybe SnapName)
 newestSnapshot LtsBranch          = fmap (uncurry SNLts) <$> newestLTS
 newestSnapshot NightlyBranch      = fmap SNNightly <$> newestNightly
 newestSnapshot (LtsMajorBranch x) = fmap (SNLts x) <$> newestLTSMajor x
 
+-- | Get the latest known LTS snapshot
 newestLTS :: GetStackageDatabase env m => m (Maybe (Int, Int))
 newestLTS =
     run $ liftM (fmap go) $ selectFirst [] [P.Desc LtsMajor, P.Desc LtsMinor]
   where
     go (Entity _ lts) = (ltsMajor lts, ltsMinor lts)
 
+-- | Get the minor version 'y' of latest known LTS snapshot for the major version 'x' in 'lts-x.y'
 newestLTSMajor :: GetStackageDatabase env m => Int -> m (Maybe Int)
 newestLTSMajor x =
     run $ liftM (fmap $ ltsMinor . entityVal) $ P.selectFirst [LtsMajor P.==. x] [P.Desc LtsMinor]
+
 
 ltsMajorVersions :: GetStackageDatabase env m => m [(Int, Int)]
 ltsMajorVersions =
@@ -122,9 +126,9 @@ ltsMajorVersions =
       where
         sameMinor (y, _) = x == y
 
+-- | Look up the date 'in the newest nightly snapshot.
 newestNightly :: GetStackageDatabase env m => m (Maybe Day)
-newestNightly =
-    run $ liftM (fmap $ nightlyDay . entityVal) $ selectFirst [] [P.Desc NightlyDay]
+newestNightly = run $ liftM (fmap $ nightlyDay . entityVal) $ selectFirst [] [P.Desc NightlyDay]
 
 -- | Get the snapshot which precedes the given one with respect to it's branch (nightly/lts)
 snapshotBefore :: GetStackageDatabase env m => SnapName -> m (Maybe (SnapshotId, SnapName))
@@ -304,6 +308,7 @@ getPackageVersionForSnapshot snapshotId pname = undefined
 getLatests :: GetStackageDatabase env m => PackageNameP -> m [LatestInfo]
 getLatests pname = pure [] -- undefined
 
+-- | Looks up in pantry the latest information about the package on Hackage.
 getHackageLatestVersion ::
        GetStackageDatabase env m => PackageNameP -> m (Maybe HackageCabalInfo)
 getHackageLatestVersion pname = pure Nothing -- undefined
@@ -362,12 +367,13 @@ type SqlExprSPI
 
 snapshotPackageInfoQuery ::
        (MonadIO m, SqlSelect a b)
-    => (SqlExpr (Entity SnapshotPackage)
-    -> SqlExpr (Entity Snapshot)
-    -> SqlExpr (Entity PackageName)
-    -> SqlExpr (Entity Version)
-    -> SqlExprSPI
-    -> SqlQuery ( a , SqlExprSPI))
+    => (   SqlExpr (Entity SnapshotPackage)
+        -> SqlExpr (Entity Snapshot)
+        -> SqlExpr (Entity PackageName)
+        -> SqlExpr (Entity Version)
+        -> SqlExprSPI
+        -> SqlQuery ( a , SqlExprSPI)
+       )
     -> ReaderT SqlBackend m [(b, SnapshotPackageInfo)]
 snapshotPackageInfoQuery customize =
     fmap (\(extraValue, spiValues) -> (extraValue, toSnapshotPackageInfo spiValues)) <$>
@@ -378,11 +384,11 @@ snapshotPackageInfoQuery customize =
              on (sp ^. SnapshotPackageSnapshot ==. s ^. SnapshotId)
              customize sp s pn v $
                  ( sp ^. SnapshotPackageId
-                 , s ^. SnapshotId
-                 , s ^. SnapshotName
+                 , s  ^. SnapshotId
+                 , s  ^. SnapshotName
                  , pn ^. PackageNameName
                  , sp ^. SnapshotPackageCabal
-                 , v ^. VersionVersion
+                 , v  ^. VersionVersion
                  , sp ^. SnapshotPackageRevision
                  , sp ^. SnapshotPackageOrigin
                  , sp ^. SnapshotPackageReadme

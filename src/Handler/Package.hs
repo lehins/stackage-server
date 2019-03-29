@@ -88,11 +88,9 @@ handleSnapshotPackage spi = do
     deps <- map (first unPackageRev) <$> getForwardDeps spi (Just maxDisplayedDeps)
     revDeps <- map (first unPackageRev) <$> getReverseDeps spi (Just maxDisplayedDeps)
     (depsCount, revDepsCount) <- getDepsCount spi
-    mhackageLatest <-
+    mhciLatest <-
         case spiOrigin spi of
-            Hackage -> do
-                mhciLatest <- getHackageLatestVersion pname -- >>= maybe notFound pure
-                pure mhciLatest
+            Hackage -> getHackageLatestVersion pname
             _ -> pure Nothing
     let mdocs = Just (spiSnapName spi, piVersion, piModuleNames)
         mSnapName = Just $ spiSnapName spi

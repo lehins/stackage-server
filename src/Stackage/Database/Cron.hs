@@ -20,9 +20,9 @@ import qualified Data.ByteString.Char8           as BS8
 import qualified Data.ByteString.Lazy            as LBS
 import qualified Data.ByteString.Lazy.Char8      as LBS8
 import qualified Data.Conduit.Binary             as CB
-import qualified Data.IntMap.Strict              as IntMap
 import           Data.Conduit.Zlib               (WindowBits (WindowBits),
                                                   compress, ungzip)
+import qualified Data.IntMap.Strict              as IntMap
 import           Data.Streaming.Network          (bindPortTCP)
 import           Database.Persist
 import           Database.Persist.Postgresql
