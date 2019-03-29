@@ -5,7 +5,6 @@
 {-# LANGUAGE LambdaCase                 #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE NoImplicitPrelude          #-}
-{-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE ViewPatterns               #-}
 module Types
@@ -77,9 +76,8 @@ import           Web.PathPieces
 data ParseFailedException = ParseFailedException !TypeRep !String
     deriving (Show, Typeable)
 instance Exception ParseFailedException where
-
-  displayException (ParseFailedException tyRep origString) =
-    "Was unable to parse " ++ (showsTypeRep tyRep ": ") ++ origString
+    displayException (ParseFailedException tyRep origString) =
+        "Was unable to parse " ++ showsTypeRep tyRep ": " ++ origString
 
 dtParse :: forall a m. (Typeable a, DT.Text a, MonadThrow m) => Text -> m a
 dtParse txt =
@@ -177,7 +175,7 @@ instance PathPiece SnapshotBranch where
 newtype PackageSetIdent = PackageSetIdent { unPackageSetIdent :: Text }
     deriving (Show, Read, Typeable, Eq, Ord, Hashable, PathPiece, ToMarkup, PersistField)
 instance PersistFieldSql PackageSetIdent where
-    sqlType = sqlType . liftM unPackageSetIdent
+    sqlType = sqlType . fmap unPackageSetIdent
 
 data PackageNameVersion = PNVTarball !PackageNameP !VersionP
                         | PNVNameVersion !PackageNameP !VersionP
@@ -190,7 +188,7 @@ data PackageIdentifierP =
     deriving (Eq, Ord, Show)
 
 instance Display PackageIdentifierP where
-  display (PackageIdentifierP pname ver) = display pname <> "-" <> display ver
+    display (PackageIdentifierP pname ver) = display pname <> "-" <> display ver
 instance PathPiece PackageIdentifierP where
     toPathPiece = textDisplay
     fromPathPiece t = do
@@ -217,7 +215,7 @@ instance SqlString SafeFilePath
 
 instance PathPiece VersionP where
     fromPathPiece = fmap VersionP . parseVersion . T.unpack
-    toPathPiece v = textDisplay v
+    toPathPiece = textDisplay
 instance ToMarkup VersionP where
     toMarkup (VersionP v) = toMarkup $ versionString v
 instance ToBuilder VersionP Builder where
@@ -235,7 +233,7 @@ instance ToMarkup Revision where
     toMarkup (Revision r) = "rev:" <> toMarkup r
 
 data VersionRev = VersionRev
-    { vrVersion :: !VersionP
+    { vrVersion  :: !VersionP
     , vrRevision :: !(Maybe Revision)
     } deriving (Eq, Show)
 
@@ -277,24 +275,28 @@ data UnpackStatus = USReady
 data GhcMajorVersion = GhcMajorVersion !Int !Int
   deriving (Eq)
 
-data GhcMajorVersionFailedParse = GhcMajorVersionFailedParse Text
-  deriving (Show, Typeable)
+newtype GhcMajorVersionFailedParse =
+    GhcMajorVersionFailedParse Text
+    deriving (Show)
 instance Exception GhcMajorVersionFailedParse
 
 instance Display GhcMajorVersion where
-  display (GhcMajorVersion a b) = display a <> "." <> display b
+    display (GhcMajorVersion a b) = display a <> "." <> display b
 
 ghcMajorVersionFromText :: MonadThrow m => Text -> m GhcMajorVersion
-ghcMajorVersionFromText t = case Reader.decimal t of
-  Right (a, T.uncons -> Just ('.', t')) -> case Reader.decimal t' of
-    Right (b, t'') | T.null t'' -> return $ GhcMajorVersion a b
-    _                           -> failedParse
-  _ -> failedParse
+ghcMajorVersionFromText t =
+    case Reader.decimal t of
+        Right (a, T.uncons -> Just ('.', t')) ->
+            case Reader.decimal t' of
+                Right (b, t'')
+                    | T.null t'' -> return $ GhcMajorVersion a b
+                _ -> failedParse
+        _ -> failedParse
   where
     failedParse = throwM $ GhcMajorVersionFailedParse t
 
 instance PersistFieldSql GhcMajorVersion where
-    sqlType = sqlType . liftM textDisplay
+    sqlType = sqlType . fmap textDisplay
 
 instance PersistField GhcMajorVersion where
     toPersistValue = toPersistValue . textDisplay
@@ -305,14 +307,13 @@ instance PersistField GhcMajorVersion where
             Nothing  -> Left $ "Cannot convert to GhcMajorVersion: " <> t
 
 instance Hashable GhcMajorVersion where
-  hashWithSalt = hashUsing textDisplay
+    hashWithSalt = hashUsing textDisplay
 
 instance FromJSON GhcMajorVersion where
-  parseJSON = withText "GhcMajorVersion" $
-    either (fail . show) return . ghcMajorVersionFromText
+    parseJSON = withText "GhcMajorVersion" $ either (fail . show) return . ghcMajorVersionFromText
 
 instance ToJSON GhcMajorVersion where
-  toJSON = toJSON . textDisplay
+    toJSON = toJSON . textDisplay
 
 
 data SupportedArch
@@ -425,14 +426,13 @@ instance ToMarkup ModuleNameP where
     toMarkup = dtDisplay . unModuleNameP
 -- In urls modules are represented with dashes, instead of dots, i.e. Foo-Bar-Baz vs Foo.Bar.Baz
 instance PathPiece ModuleNameP where
-    toPathPiece (ModuleNameP moduleName) =
-      T.intercalate "-" $ map T.pack $ DT.components moduleName
+    toPathPiece (ModuleNameP moduleName) = T.intercalate "-" $ map T.pack $ DT.components moduleName
     fromPathPiece moduleNameDashes = do
-      (moduleNameDashesNoDot, "") <- Just $ T.break (== '.') moduleNameDashes
+        (moduleNameDashesNoDot, "") <- Just $ T.break (== '.') moduleNameDashes
       -- \ make sure there are no dots in the module components
-      let moduleComponents = T.unpack <$> T.split (== '-') moduleNameDashesNoDot
-      guard (all DT.validModuleComponent moduleComponents)
-      pure $ ModuleNameP $ DT.fromComponents moduleComponents
+        let moduleComponents = T.unpack <$> T.split (== '-') moduleNameDashesNoDot
+        guard (all DT.validModuleComponent moduleComponents)
+        pure $ ModuleNameP $ DT.fromComponents moduleComponents
 
 
 

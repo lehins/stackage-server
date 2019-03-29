@@ -526,15 +526,15 @@ getReverseDeps spi mlimit = pure [] --undefined
 -- | See if a package is deprecated on hackage and in favour of which packages.
 getDeprecated :: GetStackageDatabase env m => PackageNameP -> m (Bool, [PackageNameP])
 getDeprecated pname =
-    run $ do
-        lookupPackageNameId pname >>= \case
-            Just pnid -> do
-                P.getBy (UniqueDeprecated pnid) >>= \case
-                    Just (Entity _ (Deprecated _ inFavourOfIds)) -> do
-                        names <- mapM lookupPackageNameById inFavourOfIds
-                        return (True, catMaybes names)
-                    Nothing -> return defRes
-            Nothing -> return defRes
+    run $
+    lookupPackageNameId pname >>= \case
+        Just pnid ->
+            P.getBy (UniqueDeprecated pnid) >>= \case
+                Just (Entity _ (Deprecated _ inFavourOfIds)) -> do
+                    names <- mapM lookupPackageNameById inFavourOfIds
+                    return (True, catMaybes names)
+                Nothing -> return defRes
+        Nothing -> return defRes
   where
     defRes = (False, [])
 

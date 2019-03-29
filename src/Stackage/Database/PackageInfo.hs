@@ -59,9 +59,9 @@ import           Types                                  (CompilerP (..),
                                                          FlagNameP (..),
                                                          ModuleNameP (..),
                                                          PackageNameP (..),
+                                                         SafeFilePath,
                                                          VersionP (..),
-                                                         VersionRangeP (..),
-                                                         SafeFilePath)
+                                                         VersionRangeP (..))
 import           Yesod.Form.Fields                      (Textarea (..))
 
 data PackageInfo = PackageInfo
@@ -107,7 +107,7 @@ toPackageInfo gpd mreadme mchangelog moduleNames =
         let txt = decodeUtf8With lenientDecode bs
          in if isMarkdown
                 then preEscapedToHtml $
-                     commonmarkToHtml [optSmart, optSafe] [extTable, extAutolink] txt
+                     commonmarkToHtml [optSmart] [extTable, extAutolink] txt
                 else toHtml $ Textarea txt
 
 getSynopsis :: GenericPackageDescription -> Text

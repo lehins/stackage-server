@@ -1,10 +1,10 @@
-resolver: lts-12.12
+resolver: lts-12.26
 name: stackage-server-snapshot
 packages:
-# - git: https://github.com/commercialhaskell/stack
-#   commit: 4fbd9b7404159af08fff709265199f8f8c5d2605
-#   subdirs:
-#   - subs/pantry
+- git: https://github.com/lehins/stack
+  commit: c8e8a3b2b7136d8b2d8b8341a9ba80dde9e661c2
+  subdirs:
+  - subs/pantry
 - Cabal-2.4.0.1@rev:0
 - githash-0.1.1.0@rev:0
 - hpack-0.31.0@rev:0

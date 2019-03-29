@@ -113,8 +113,7 @@ withResponseUnliftIO req man f = withRunInIO $ \ run -> withResponse req man (ru
 
 newHoogleLocker ::
        (HasLogFunc env, MonadIO m) => env -> Manager -> m (SingleRun SnapName (Maybe FilePath))
-newHoogleLocker env man = do
-    mkSingleRun hoogleLocker
+newHoogleLocker env man = mkSingleRun hoogleLocker
   where
     hoogleLocker :: MonadIO m => SnapName -> m (Maybe FilePath)
     hoogleLocker name =
@@ -135,8 +134,7 @@ newHoogleLocker env man = do
                                     bodyReaderSource (responseBody res) .| ungzip .| sinkFile fptmp
                                 renamePath fptmp fp
                                 return $ Just fp
-                            else do
-                                return Nothing
+                            else return Nothing
 
 
 getHackageDeprecations ::
@@ -156,7 +154,7 @@ stackageServerCron :: Bool -> IO ()
 stackageServerCron forceUpdate = do
     -- Hacky approach instead of PID files
     _ <- liftIO $ catchIO (bindPortTCP 17834 "127.0.0.1") $ \_ ->
-        error $ "cabal loader process already running, exiting"
+        error "cabal loader process already running, exiting"
     connectionCount <- getNumCapabilities
     storage <- initStorage connectionCount
     lo <- logOptionsHandle stdout True
@@ -200,18 +198,16 @@ runStackageUpdate = do
         UpdateOccurred -> do
             logInfo "Updated hackage index. Getting deprecated info now"
             getHackageDeprecations >>= run . mapM_ addDeprecated
-        NoUpdateOccurred -> do
-            logInfo "No new packages in hackage index"
+        NoUpdateOccurred -> logInfo "No new packages in hackage index"
     corePackageGetters <- makeCorePackageGetters
-    finalAction <-
-        runConduitRes $
-        sourceSnapshots .|
-        foldMC (createOrUpdateSnapshot corePackageGetters) (pure ())
-    runResourceT finalAction
-    run $ mapM_ (flip rawExecute []) ["COMMIT", "VACUUM", "BEGIN"]
+    runResourceT $
+        join $
+        runConduit $ sourceSnapshots .| foldMC (createOrUpdateSnapshot corePackageGetters) (pure ())
+    run $ mapM_ (`rawExecute` []) ["COMMIT", "VACUUM", "BEGIN"]
 
 
-
+-- | This will look at 'global-hints.yaml' and will create core package getters that are reused
+-- later for adding those package to individual snapshot.
 makeCorePackageGetters ::
        RIO StackageCron (Map CompilerP [CorePackageGetter])
 makeCorePackageGetters = do
@@ -234,7 +230,7 @@ makeCorePackageGetters = do
 -- package on subsequent invocations.
 makeCorePackageGetter ::
        CompilerP -> PackageNameP -> VersionP -> RIO StackageCron (Maybe CorePackageGetter)
-makeCorePackageGetter _compiler pname ver = do
+makeCorePackageGetter _compiler pname ver =
     run (getHackageCabalByRev0 pid) >>= \case
         Nothing -> do
             logError $
@@ -272,6 +268,8 @@ makeCorePackageGetter _compiler pname ver = do
 
 
 -- TODO: for now it is only from hackage, PantryPackage needs an update to use other origins
+-- | A pantry package is being added to a particular snapshot. Extra information like compiler and
+-- flags are passed on in order to properly figure out dependencies and modules
 addPantryPackage ::
        SnapshotId -> CompilerP -> Bool -> Map FlagNameP Bool -> PantryPackage -> RIO StackageCron Bool
 addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
@@ -290,7 +288,7 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
                         Nothing ->
                             loadBlobById treeCabal >>=
                             updateCacheGPD (blobKeyToInt treeCabal) . parseCabalBlob
-    let storeHackageSnapshotPackage hcid mtid mgpd = do
+    let storeHackageSnapshotPackage hcid mtid mgpd =
             getTreeForKey treeKey >>= \case
                 (Just (Entity treeId _))
                     | Just tid <- mtid
@@ -331,9 +329,12 @@ checkForDocs snapshotId snapName = do
         concatMapC (T.stripPrefix prefix) .|
         concatMapC pathToPackageModule .|
         sinkList
+    -- it is faster to download all modules in this snapshot, than process them with a conduit all
+    -- the way to the database.
     sidsCacheRef <- newIORef Map.empty
+    -- Cache is for SnapshotPackageId, there will be many modules per peckage, no need to look into
+    -- the database for each one of them.
     notFoundList <- lift $ pooledMapConcurrently (markModules sidsCacheRef) mods
-    --(_, notFoundSet) <- lift $ foldM markModules (Map.empty, Set.empty) mods
     forM_ (Set.fromList $ catMaybes notFoundList) $ \pid ->
         lift $
         logError $
@@ -361,7 +362,8 @@ checkForDocs snapshotId snapName = do
                     pure Nothing
             _ -> pure Nothing
 
-
+-- | Use 'github.com/commercialhaskell/stackage-snapshots' repository to source all of the packages
+-- one snapshot at a time.
 sourceSnapshots ::
        ConduitT a (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile)) (ResourceT (RIO StackageCron)) ()
 sourceSnapshots = do
@@ -398,7 +400,7 @@ sourceSnapshots = do
             Right updatedOn -> do
                 env <- lift ask
                 return $ Just $ (,,) snapName updatedOn $ runRIO env (parseSnapshot updatedOn)
-    getLtsParser gitDir fp = do
+    getLtsParser gitDir fp =
         case mapM (BS8.readInt . BS8.pack) $ take 2 $ reverse (splitPath fp) of
             Just [(minor, ".yaml"), (major, "/")] ->
                 getSnapshotParser gitDir fp Nothing $ SNLts major minor
@@ -406,7 +408,7 @@ sourceSnapshots = do
                 logError
                     ("Couldn't parse the filepath into an LTS version: " <> display (T.pack fp))
                 return Nothing
-    getNightlyParser gitDir fp = do
+    getNightlyParser gitDir fp =
         case mapM (BS8.readInt . BS8.pack) $ take 3 $ reverse (splitPath fp) of
             Just [(day, ".yaml"), (month, "/"), (year, "/")]
                 | Just date <- fromGregorianValid (fromIntegral year) month day ->
@@ -464,10 +466,9 @@ createOrUpdateSnapshot ::
     -> ResourceT (RIO StackageCron) ()
     -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
     -> ResourceT (RIO StackageCron) (ResourceT (RIO StackageCron) ())
-createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo = do
+createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo@(_, updatedOn, _) =
     snd <$> concurrently prevAction (lift loadCurrentSnapshot)
   where
-    (_, updatedOn, _) = snapInfo
     loadCurrentSnapshot =
         decideOnSnapshotUpdate snapInfo >>= \case
             Nothing -> return $ pure ()
@@ -491,16 +492,6 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
                 run $ addSnapshotPackage snapshotId sfCompiler Core mTree mhcid False mempty pid gpd
     loadedPackageCountRef <- newIORef (0 :: Int)
     let totalPackages = length sfPackages
-        progressReporter =
-            forever $ do
-                loadedPackageCount <- readIORef loadedPackageCountRef
-                logSticky $
-                    "Loading snapshot '" <> display sfName <> "' (" <>
-                    displayShow loadedPackageCount <>
-                    "/" <>
-                    displayShow totalPackages <>
-                    ")"
-                threadDelay 1000000
         addPantryPackageWithReport pp = do
             let PantryCabal {pcPackageName} = ppPantryCabal pp
                 isHidden = fromMaybe False (Map.lookup pcPackageName sfHidden)
@@ -508,24 +499,12 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
             curSucc <- addPantryPackage snapshotId sfCompiler isHidden flags pp
             atomicModifyIORef' loadedPackageCountRef (\c -> (c + 1, ()))
             pure curSucc
-    -- adjust for hyperthreading and leave some cores for doc loader
+    -- Leave some cores and db connections for the doc loader
     connCount <- max 1 . (`div` 2) . pcConnectionCount <$> view pantryConfigL
-    before <- getCurrentTime
     ePantryUpdatesSucceeded <-
-        race progressReporter $
-        pooledMapConcurrentlyN connCount addPantryPackageWithReport sfPackages
-    after <- getCurrentTime
-    let (mins, secs) = round (diffUTCTime after before) `quotRem` (60 :: Int)
-    logInfo $
-        mconcat
-            [ "Loading snapshot '"
-            , display sfName
-            , "' was done (in "
-            , displayShow mins
-            , "min "
-            , displayShow secs
-            , "sec). There are still docs."
-            ]
+        race
+            (runProgressReporter loadedPackageCountRef totalPackages sfName)
+            (pooledMapConcurrentlyN connCount addPantryPackageWithReport sfPackages)
     logSticky "Still loading the docs for previous snapshot ..."
     let pantryUpdateSucceeded = either (const False) and ePantryUpdatesSucceeded
     return $ do
@@ -541,6 +520,42 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
                 logInfo $ "Created or updated snapshot '" <> display sfName <> "' successfully"
             else logError $ "There were errors while adding snapshot '" <> display sfName <> "'"
 
+-- | Report how many packages has been loaded so far and provide statistics at the end.
+runProgressReporter :: IORef Int -> Int -> SnapName -> RIO StackageCron Void
+runProgressReporter loadedPackageCountRef totalPackages snapName = do
+    before <- getCurrentTime
+    finally (forever reportProgress) $ do
+        after <- getCurrentTime
+        loadedPackageCount <- readIORef loadedPackageCountRef
+        let timeTotal = round (diffUTCTime after before)
+            (mins, secs) = timeTotal `quotRem` (60 :: Int)
+            timePerPackage = timeTotal `div` loadedPackageCount
+        logInfo $
+            mconcat
+                [ "Loading snapshot '"
+                , display snapName
+                , "' was done (in "
+                , displayShow mins
+                , "min "
+                , displayShow secs
+                , "sec). With average "
+                , displayShow timePerPackage
+                , "sec spent per packages. There are still docs."
+                ]
+  where
+    reportProgress = do
+        loadedPackageCount <- readIORef loadedPackageCountRef
+        logSticky $
+            mconcat
+                [ "Loading snapshot '"
+                , display snapName
+                , "' ("
+                , displayShow loadedPackageCount
+                , "/"
+                , displayShow totalPackages
+                , ")"
+                ]
+        threadDelay 1000000
 
 
 -- #if !DEVELOPMENT

@@ -1,6 +1,6 @@
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-
 module Handler.Home
     ( getHomeR
     , getAuthorsR

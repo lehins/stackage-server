@@ -151,9 +151,9 @@ run inner = do
 
 
 openStackageDatabase :: MonadIO m => PostgresConf -> m Storage
-openStackageDatabase pg = liftIO $ do
-    --fmap Storage $ runNoLoggingT $ createPostgresqlPool
-    fmap Storage $ runStdoutLoggingT $ createPostgresqlPool
+openStackageDatabase pg = liftIO $
+    fmap Storage $ runNoLoggingT $ createPostgresqlPool
+    --fmap Storage $ runStdoutLoggingT $ createPostgresqlPool
       (pgConnStr pg)
       (pgPoolSize pg)
 

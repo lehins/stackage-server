@@ -1,4 +1,4 @@
 resolver: snapshot.yaml
 packages:
   - '.'
-  - '../stack/subs/pantry'
+  # - '../stack/subs/pantry'
