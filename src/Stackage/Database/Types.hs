@@ -29,12 +29,17 @@ module Stackage.Database.Types
     , VersionRangeP(..)
     , PackageIdentifierP(..)
     , VersionRev(..)
+    , toRevMaybe
+    , toVersionRev
     , PackageVersionRev(..)
     , ModuleNameP(..)
+    , SafeFilePath
     , PackageOrigin(..)
     , LatestInfo(..)
     , Deprecation(..)
     , haddockBucketName
+    , Changelog(..)
+    , Readme(..)
     ) where
 
 import           Data.Aeson
@@ -91,24 +96,6 @@ data SnapshotFile = SnapshotFile
     , sfFlags     :: !(Map PackageNameP (Map FlagNameP Bool))
     , sfCreatedOn :: !(Maybe Day) -- TODO: switch to UTCTime and get it from yaml
     }
-
-
--- data PantryOrigin =
---   PantryHackage HackageOrigin
---   | PantryRepo Repo
---   | PantryArchive Archive
-
--- data PantryPackage = PantryPackage
---     { ppPantryOrigin :: !PantryOrigin
---     , ppPantryKey    :: !TreeKey
---     } deriving (Show)
-
-
--- data HackageOrigin = HackageOrigin
---     { hoPackageName    :: !PackageNameP
---     , hoPackageVersion :: !VersionP
---     , hoCabalKey       :: !BlobKey
---     } deriving (Show)
 
 
 data PantryCabal = PantryCabal
@@ -208,10 +195,10 @@ instance ToJSON PackageListingInfo where
 
 
 data HackageCabalInfo = HackageCabalInfo
-    { hciCabalId     :: !HackageCabalId
-    , hciCabalBlobId :: !BlobId
-    , hciPackageName :: !PackageNameP
-    , hciVersionRev  :: !VersionRev
+    { hciCabalId           :: !HackageCabalId
+    , hciCabalBlobId       :: !BlobId
+    , hciPackageIdentifier :: !PackageNameP
+    , hciVersionRev        :: !VersionRev
     } deriving (Show, Eq)
 
 data SnapshotPackageInfo = SnapshotPackageInfo
@@ -221,12 +208,20 @@ data SnapshotPackageInfo = SnapshotPackageInfo
     , spiSnapName          :: !SnapName
     , spiPackageName       :: !PackageNameP
     , spiVersion           :: !VersionP
-    , spiHackageCabalInfo  :: !(Maybe HackageCabalInfo)
+    , spiRevision          :: !(Maybe Revision)
+    , spiOrigin            :: !PackageOrigin
+    , spiReadme            :: !(Maybe TreeEntryId)
+    , spiChangelog         :: !(Maybe TreeEntryId)
     } deriving (Show, Eq)
 
+toRevMaybe :: Revision -> Maybe Revision
+toRevMaybe rev = guard (rev /= Revision 0) >> Just rev
+
+toVersionRev :: VersionP -> Revision -> VersionRev
+toVersionRev v = VersionRev v . toRevMaybe
+
 spiVersionRev :: SnapshotPackageInfo -> VersionRev
-spiVersionRev spi =
-    maybe (VersionRev (spiVersion spi) Nothing) hciVersionRev (spiHackageCabalInfo spi)
+spiVersionRev spi = VersionRev (spiVersion spi) (spiRevision spi >>= toRevMaybe)
 
 data ModuleListingInfo = ModuleListingInfo
     { mliModuleName        :: !ModuleNameP
@@ -254,3 +249,7 @@ instance FromJSON Deprecation where
     parseJSON = withObject "Deprecation" $ \o -> Deprecation
         <$> o .: "deprecated-package"
         <*> o .: "in-favour-of"
+
+
+data Readme = Readme !ByteString !Bool
+data Changelog = Changelog !ByteString !Bool

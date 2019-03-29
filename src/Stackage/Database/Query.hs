@@ -23,8 +23,7 @@ module Stackage.Database.Query
 
     -- * Package
 
-    , getHackageCabal
-    , getPantryHackageCabal
+    -- , getPantryHackageCabal
     , getAllPackages
     , getPackagesForSnapshot
     , getPackageVersionForSnapshot
@@ -32,7 +31,7 @@ module Stackage.Database.Query
     , getLatests
     , getHackageLatestVersion
     , getSnapshotPackageInfo
-    , getSnapshotLatestVersion
+    , getSnapshotPackageLatestVersion
     , getPackageInfo
     , getSnapshotsForPackage
 
@@ -66,18 +65,22 @@ module Stackage.Database.Query
 import qualified Data.Aeson                    as A
 import qualified Data.List                     as L
 import           Database.Esqueleto
+import           Database.Esqueleto.Internal.Sql --(SqlSelect)
 import qualified Database.Persist              as P
 import           Pantry.Storage                (EntityField (..), Unique (..),
+                                                PackageName, Version,
                                                 getPackageNameId, getPackageNameById,
                                                 getTreeForKey,
                                                 getVersionId, loadBlobById,
                                                 treeCabal)
+import           Pantry.Types                  (mkSafeFilePath)
 import           RIO                           hiding (on, (^.))
 import qualified RIO.Map                       as Map
 import qualified RIO.Set                       as Set
 import qualified RIO.Text                      as T
 import           RIO.Time                      (Day, UTCTime)
 import           Stackage.Database.PackageInfo
+import Data.Bifunctor (bimap)
 import           Stackage.Database.Schema
 import           Stackage.Database.Types
 
@@ -299,54 +302,188 @@ getPackageVersionForSnapshot
 getPackageVersionForSnapshot snapshotId pname = undefined
 
 getLatests :: GetStackageDatabase env m => PackageNameP -> m [LatestInfo]
-getLatests pname = undefined
+getLatests pname = pure [] -- undefined
 
 getHackageLatestVersion ::
        GetStackageDatabase env m => PackageNameP -> m (Maybe HackageCabalInfo)
-getHackageLatestVersion pname = undefined
+getHackageLatestVersion pname = pure Nothing -- undefined
 
 
 getSnapshotPackageInfo ::
-       GetStackageDatabase env m => SnapName -> PackageNameP -> m (Maybe getSnapshotPackageInfo)
-getSnapshotPackageInfo sname pname = undefined
+       GetStackageDatabase env m => SnapName -> PackageNameP -> m (Maybe SnapshotPackageInfo)
+getSnapshotPackageInfo snapName pname =
+    fmap snd . listToMaybe <$>
+    run (snapshotPackageInfoQuery $ \_sp s pn _v spiQ -> do
+             where_ ((s ^. SnapshotName ==. val snapName) &&. (pn ^. PackageNameName ==. val pname))
+             pure ((), spiQ))
 
 
-getSnapshotLatestVersion ::
+--       fmap toSnapshotPackageInfo . listToMaybe <$>
+  --           select
+  --               (from $ \(sp `InnerJoin` s `InnerJoin` pn `InnerJoin` v) -> do
+  --                    on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
+  --                    on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+  --                    on (sp ^. SnapshotPackageSnapshot ==. s ^. SnapshotId)
+  --                    where_
+  --                        ((s ^. SnapshotName ==. val snapName) &&.
+  --                         (pn ^. PackageNameName ==. val pname))
+  --                    pure
+  --                        ( sp ^. SnapshotPackageId
+  --                        , s ^. SnapshotId
+  --                        , sp ^. SnapshotPackageCabal
+  --                        , v ^. VersionVersion
+  --                        , sp ^. SnapshotPackageRevision
+  --                        , sp ^. SnapshotPackageOrigin))
+  -- where
+  --   toSnapshotPackageInfo (spid, sid, spc, v, spr, spo) =
+  --       SnapshotPackageInfo
+  --           { spiSnapshotPackageId = unValue spid
+  --           , spiSnapshotId = unValue sid
+  --           , spiCabalBlobId = unValue spc
+  --           , spiSnapName = snapName
+  --           , spiPackageName = pname
+  --           , spiVersion = unValue v
+  --           , spiRevision = unValue spr
+  --           , spiOrigin = unValue spo
+  --           }
+
+type SqlExprSPI
+     = ( SqlExpr (Value SnapshotPackageId)
+       , SqlExpr (Value SnapshotId)
+       , SqlExpr (Value SnapName)
+       , SqlExpr (Value PackageNameP)
+       , SqlExpr (Value (Maybe BlobId))
+       , SqlExpr (Value VersionP)
+       , SqlExpr (Value (Maybe Revision))
+       , SqlExpr (Value PackageOrigin)
+       , SqlExpr (Value (Maybe TreeEntryId))
+       , SqlExpr (Value (Maybe TreeEntryId))
+       )
+
+snapshotPackageInfoQuery ::
+       (MonadIO m, SqlSelect a b)
+    => (SqlExpr (Entity SnapshotPackage)
+    -> SqlExpr (Entity Snapshot)
+    -> SqlExpr (Entity PackageName)
+    -> SqlExpr (Entity Version)
+    -> SqlExprSPI
+    -> SqlQuery ( a , SqlExprSPI))
+    -> ReaderT SqlBackend m [(b, SnapshotPackageInfo)]
+snapshotPackageInfoQuery customize =
+    fmap (\(extraValue, spiValues) -> (extraValue, toSnapshotPackageInfo spiValues)) <$>
+    select
+        (from $ \(sp `InnerJoin` s `InnerJoin` pn `InnerJoin` v) -> do
+             on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
+             on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+             on (sp ^. SnapshotPackageSnapshot ==. s ^. SnapshotId)
+             customize sp s pn v $
+                 ( sp ^. SnapshotPackageId
+                 , s ^. SnapshotId
+                 , s ^. SnapshotName
+                 , pn ^. PackageNameName
+                 , sp ^. SnapshotPackageCabal
+                 , v ^. VersionVersion
+                 , sp ^. SnapshotPackageRevision
+                 , sp ^. SnapshotPackageOrigin
+                 , sp ^. SnapshotPackageReadme
+                 , sp ^. SnapshotPackageChangelog))
+  where
+    toSnapshotPackageInfo (spid, sid, sn, pn, spc, v, spr, spo, rm, cl) =
+        SnapshotPackageInfo
+            { spiSnapshotPackageId = unValue spid
+            , spiSnapshotId = unValue sid
+            , spiCabalBlobId = unValue spc
+            , spiSnapName = unValue sn
+            , spiPackageName = unValue pn
+            , spiVersion = unValue v
+            , spiRevision = unValue spr
+            , spiOrigin = unValue spo
+            , spiReadme = unValue rm
+            , spiChangelog = unValue cl
+            }
+
+
+getSnapshotPackageLatestVersion ::
        GetStackageDatabase env m
     => PackageNameP
     -> m (Maybe SnapshotPackageInfo)
-getSnapshotLatestVersion pname = undefined
-    -- snaps <- getSnapshotsForPackage pname (Just 1)
-    -- return $ listToMaybe [(s, hci) | (s, _, hci) <- snaps]
+getSnapshotPackageLatestVersion pname =
+    fmap snd . listToMaybe <$>
+    run (snapshotPackageInfoQuery $ \_sp s pn v spiQ -> do
+             where_ (pn ^. PackageNameName ==. val pname)
+             orderBy
+                 [ desc (stringToArray (v ^. VersionVersion) (val ("." :: String)))
+                 , desc (s ^. SnapshotCreated)
+                 ]
+             limit 1
+             pure ((), spiQ))
 
+stringToArray ::
+       (SqlString s1, SqlString s2)
+    => SqlExpr (Value s1)
+    -> SqlExpr (Value s2)
+    -> SqlExpr (Value [Int64])
+stringToArray s1 s2 = unsafeSqlFunction "string_to_array" (s1, s2)
 
 getSnapshotsForPackage
     :: GetStackageDatabase env m
     => PackageNameP
     -> Maybe Int
     -> m [(CompilerP, SnapshotPackageInfo)]
-getSnapshotsForPackage pname mlimit = undefined
+getSnapshotsForPackage pname mlimit =
+    fmap (first unValue) <$>
+    run (snapshotPackageInfoQuery $ \_sp s pn _v spiQ -> do
+             where_ (pn ^. PackageNameName ==. val pname)
+             orderBy [desc (s ^. SnapshotCreated)]
+             forM_ mlimit (limit . fromIntegral)
+             pure (s ^. SnapshotCompiler, spiQ))
 
 
-getHackageCabal ::
-       MonadIO m
-    => PackageNameP
-    -> VersionP
-    -> Maybe Revision
-    -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId, Maybe TreeId))
-getHackageCabal pname ver mrev = undefined
+-- getPantryHackageCabal
+--   :: MonadIO m
+--   => PantryCabal
+--   -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId))
+-- getPantryHackageCabal (PantryCabal {..}) = undefined
 
 
-getPantryHackageCabal
-  :: MonadIO m
-  => PantryCabal
-  -> ReaderT SqlBackend m (Maybe (HackageCabalId, BlobId))
-getPantryHackageCabal (PantryCabal {..}) = undefined
+getPackageInfo :: GetStackageDatabase env m => SnapshotPackageInfo -> m PackageInfo
+getPackageInfo spi =
+    run $
+    case spiCabalBlobId spi of
+        Just cabalBlobId -> do
+            gpd <- parseCabalBlob <$> loadBlobById cabalBlobId
+            mreadme <- maybe (pure Nothing) getFileByTreeEntryId (spiReadme spi)
+            mchangelog <- maybe (pure Nothing) getFileByTreeEntryId (spiChangelog spi)
+            moduleNames <- getModuleNames (spiSnapshotPackageId spi)
+            pure $
+                toPackageInfo
+                    gpd
+                    (toContentFile Readme <$> mreadme)
+                    (toContentFile Changelog <$> mchangelog)
+                    moduleNames
+        Nothing -> error "FIXME: we ought to return Nothing"
+               -- FIXME: handle a case when cabal file isn't available
+  where
+    toContentFile :: (ByteString -> Bool -> a) -> (SafeFilePath, ByteString) -> a
+    toContentFile con (path, bs) = con bs (isMarkdownFilePath path)
 
+getFileByTreeEntryId teid =
+    fmap (bimap unValue unValue) . listToMaybe <$>
+    select
+        (from $ \(te `InnerJoin` fp `InnerJoin` b) -> do
+             on $ te ^. TreeEntryBlob ==. b ^. BlobId
+             on $ te ^. TreeEntryPath ==. fp ^. FilePathId
+             where_ $ te ^. TreeEntryId ==. val teid
+             pure (fp ^. FilePathPath, b ^. BlobContents))
 
-getPackageInfo :: GetStackageDatabase env m => SnapshotPackageInfo -> m (PackageInfo, [ModuleNameP])
-getPackageInfo spi = undefined
-
+getModuleNames spid =
+    map unValue <$>
+    select
+        (from $ \(spm `InnerJoin` pm) -> do
+             on $ (spm ^. SnapshotPackageModuleModule ==. pm ^. ModuleId)
+             where_ (spm ^. SnapshotPackageModuleSnapshotPackage ==. val spid)
+             orderBy [desc (pm ^. ModuleName)]
+             pure (pm ^. ModuleName))
 
 ------ Dependencies
 
@@ -355,14 +492,14 @@ getForwardDeps ::
     => SnapshotPackageInfo
     -> Maybe Int
     -> m [(PackageVersionRev, Text)]
-getForwardDeps spi mlimit = undefined
+getForwardDeps spi mlimit = pure [] -- undefined
 
 
 getForwardDepsCount :: MonadIO m => SnapshotPackageInfo -> ReaderT SqlBackend m Int
 getForwardDepsCount spi = P.count [DepUser P.==. spiSnapshotPackageId spi]
 
 getReverseDepsCount :: MonadIO m => SnapshotPackageInfo -> ReaderT SqlBackend m Int
-getReverseDepsCount spi = undefined
+getReverseDepsCount spi = pure 0 -- undefined
 
 getDepsCount :: GetStackageDatabase env m => SnapshotPackageInfo -> m (Int, Int)
 getDepsCount spi =
@@ -375,7 +512,7 @@ getReverseDeps ::
     => SnapshotPackageInfo
     -> Maybe Int -- ^ Optionally limit number of dependencies
     -> m [(PackageVersionRev, Text)]
-getReverseDeps spi mlimit = undefined
+getReverseDeps spi mlimit = pure [] --undefined
 
 
 ----- Deprecated
@@ -453,29 +590,66 @@ addSnapshotPackage ::
 addSnapshotPackage snapshotId compiler origin mTree mHackageCabalId isHidden flags pid gpd = do
     let PackageIdentifierP pname pver = pid
         keyInsertBy = fmap (either entityKey id) . P.insertBy
+        mTreeId = entityKey <$> mTree
     packageNameId <-
         maybe (getPackageNameId (unPackageNameP pname)) (pure . treeName . entityVal) mTree
     versionId <- maybe (getVersionId (unVersionP pver)) (pure . treeVersion . entityVal) mTree
+    mrevision <- maybe (pure Nothing) getHackageRevision mHackageCabalId
+    mreadme <- fromMaybe (pure Nothing) $ getContentTreeEntryId <$> mTreeId <*> mreadmeQuery
+    mchangelog <- fromMaybe (pure Nothing) $ getContentTreeEntryId <$> mTreeId <*> mchangelogQuery
     let snapshotPackage =
             SnapshotPackage
                 { snapshotPackageSnapshot = snapshotId
                 , snapshotPackagePackageName = packageNameId
                 , snapshotPackageVersion = versionId
+                , snapshotPackageRevision = mrevision
                 , snapshotPackageCabal = treeCabal . entityVal <$> mTree
-                , snapshotPackageHackageCabal = mHackageCabalId
+                , snapshotPackageTreeBlob = treeKey . entityVal <$> mTree
                 , snapshotPackageOrigin = origin
                 , snapshotPackageOriginUrl = "" -- TODO: add
                 , snapshotPackageSynopsis = getSynopsis gpd
-                , snapshotPackageReadme = Nothing -- TODO: find from Tree
-                , snapshotPackageChangelog = Nothing -- TODO: find from Tree
+                , snapshotPackageReadme = mreadme
+                , snapshotPackageChangelog = mchangelog
                 , snapshotPackageIsHidden = isHidden
                 , snapshotPackageFlags = flags
                 }
     snapshotPackageId <- keyInsertBy snapshotPackage
     -- TODO: collect all missing dependencies
     _ <- insertDeps pid snapshotPackageId (extractDependencies compiler flags gpd)
-    insertSnapshotPackageModules snapshotPackageId (getModuleNames gpd)
+    insertSnapshotPackageModules snapshotPackageId (extractModuleNames gpd)
 
+getContentTreeEntryId ::
+       (MonadIO m)
+    => TreeId
+    -> (SqlExpr (Value SafeFilePath) -> SqlExpr (Value Bool))
+    -> ReaderT SqlBackend m (Maybe TreeEntryId)
+getContentTreeEntryId treeId filePathQuery = do
+    (mteid, _isMarkdown) <- foldl' preferMarkdown (Nothing, False) <$>
+      select
+          (from $ \(te `InnerJoin` p) -> do
+               on $ te ^. TreeEntryPath ==. p ^. FilePathId
+               where_ $ (te ^. TreeEntryTree ==. val treeId) &&. filePathQuery (p ^. FilePathPath)
+               pure (p ^. FilePathPath, te ^. TreeEntryId))
+    pure mteid
+  where preferMarkdown (_, False) (Value path, Value teid) = (Just teid, isMarkdownFilePath path)
+        preferMarkdown pref@(_, True) _ = pref
+
+mchangelogQuery :: Maybe (SqlExpr (Value SafeFilePath) -> SqlExpr (Value Bool))
+mchangelogQuery = do
+  changelog <- mkSafeFilePath "changelog."
+  changes <- mkSafeFilePath "changes."
+  pure (\ path -> (path `ilike` val changelog ++. (%)) ||. (path `ilike` val changes  ++. (%)))
+
+mreadmeQuery :: Maybe (SqlExpr (Value SafeFilePath) -> SqlExpr (Value Bool))
+mreadmeQuery = do
+  readme <- mkSafeFilePath "readme."
+  pure (\ path -> path `ilike` val readme ++. (%))
+
+getHackageRevision :: MonadIO m => HackageCabalId -> ReaderT SqlBackend m (Maybe Revision)
+getHackageRevision hcid =
+    fmap unValue . listToMaybe <$>
+    select
+        (from $ \hc -> where_ (hc ^. HackageCabalId ==. val hcid) >> pure (hc ^. HackageCabalRevision))
 
 
 lookupPackageNameId :: MonadIO m => PackageNameP -> ReaderT SqlBackend m (Maybe PackageNameId)

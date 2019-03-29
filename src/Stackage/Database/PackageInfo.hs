@@ -5,13 +5,17 @@ module Stackage.Database.PackageInfo
     , parseCabalBlob
     , parseCabalBlobMaybe
     , extractDependencies
-    , getModuleNames
+    , extractModuleNames
     , getSynopsis
+    , isMarkdownFilePath
     ) where
 
+import           CMarkGFM
 import           Data.Coerce
 import           Data.Map.Merge.Strict                  as Map
 import qualified Data.Text                              as T
+import           Data.Text.Encoding                     (decodeUtf8With)
+import           Data.Text.Encoding.Error               (lenientDecode)
 import           Distribution.Compiler                  (CompilerFlavor (GHC))
 import           Distribution.Package                   (Dependency (..),
                                                          PackageIdentifier (..))
@@ -42,51 +46,83 @@ import           Distribution.Types.VersionRange        (VersionRange,
                                                          normaliseVersionRange,
                                                          withinRange)
 import           Distribution.Version                   (simplifyVersionRange)
+import           Pantry.Types                           (unSafeFilePath)
 import           RIO
 import qualified RIO.Map                                as Map
 import qualified RIO.Map.Unchecked                      as Map (mapKeysMonotonic)
 import           Stackage.Database.Haddock              (renderHaddock)
-import           Text.Blaze.Html                        (Html)
-import           Types                                  (CompilerP(..),
-                                                         FlagNameP(..),
+import           Stackage.Database.Types                (Changelog (..),
+                                                         Readme (..))
+import           Text.Blaze.Html                        (Html, preEscapedToHtml,
+                                                         toHtml)
+import           Types                                  (CompilerP (..),
+                                                         FlagNameP (..),
                                                          ModuleNameP (..),
                                                          PackageNameP (..),
                                                          VersionP (..),
-                                                         VersionRangeP (..))
+                                                         VersionRangeP (..),
+                                                         SafeFilePath)
+import           Yesod.Form.Fields                      (Textarea (..))
 
 data PackageInfo = PackageInfo
-    { piName        :: PackageNameP
-    , piVersion     :: VersionP
-    , piSynopsis    :: Text
-    , piDescription :: Html
-    , piChangelog   :: Html
-    , piAuthor      :: Text
-    , piMaintainer  :: Text
-    , piHomepage    :: Text
-    , piLicenseName :: Text
+    { piName        :: !PackageNameP
+    , piVersion     :: !VersionP
+    , piSynopsis    :: !Text
+    , piDescription :: !Html
+    , piAuthor      :: !Text
+    , piMaintainer  :: !Text
+    , piHomepage    :: !Text
+    , piLicenseName :: !Text
+    , piReadme      :: !Html
+    , piChangelog   :: !Html
+    , piModuleNames :: ![ModuleNameP]
     }
 
 
-toPackageInfo :: GenericPackageDescription -> PackageInfo
-toPackageInfo gpd =
+toPackageInfo ::
+       GenericPackageDescription
+    -> Maybe Readme
+    -> Maybe Changelog
+    -> [ModuleNameP]
+    -> PackageInfo
+toPackageInfo gpd mreadme mchangelog moduleNames =
     PackageInfo
         { piName = PackageNameP $ pkgName $ package pd
         , piVersion = VersionP $ pkgVersion $ package pd
         , piSynopsis = T.pack $ synopsis pd
-        , piDescription = renderHaddock (description pd) -- FIXME: use README.md if available
-        , piChangelog = mempty -- FIXME: get changelog
+        , piDescription = renderHaddock (description pd)
+        , piReadme =
+              maybe mempty (\(Readme bs isMarkdown) -> renderContent bs isMarkdown) mreadme
+        , piChangelog =
+              maybe mempty (\(Changelog bs isMarkdown) -> renderContent bs isMarkdown) mchangelog
         , piAuthor = T.pack $ author pd
         , piMaintainer = T.pack $ maintainer pd
         , piHomepage = T.pack $ homepage pd
         , piLicenseName = T.pack $ prettyShow $ license pd
+        , piModuleNames = moduleNames
         }
-  where pd = packageDescription gpd
+  where
+    pd = packageDescription gpd
+    renderContent bs isMarkdown =
+        let txt = decodeUtf8With lenientDecode bs
+         in if isMarkdown
+                then preEscapedToHtml $
+                     commonmarkToHtml [optSmart, optSafe] [extTable, extAutolink] txt
+                else toHtml $ Textarea txt
 
 getSynopsis :: GenericPackageDescription -> Text
 getSynopsis = T.pack . synopsis . packageDescription
 
-getModuleNames :: GenericPackageDescription -> [ModuleNameP]
-getModuleNames = maybe [] (coerce . exposedModules . condTreeData) . condLibrary
+extractModuleNames :: GenericPackageDescription -> [ModuleNameP]
+extractModuleNames = maybe [] (coerce . exposedModules . condTreeData) . condLibrary
+
+
+isMarkdownFilePath :: SafeFilePath -> Bool
+isMarkdownFilePath sfp =
+    case T.split (== '.') $ unSafeFilePath sfp of
+        [_, "md"]       -> True
+        [_, "markdown"] -> True
+        _               -> False
 
 
 extractDependencies ::

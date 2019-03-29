@@ -41,7 +41,7 @@ module Stackage.Database.Schema
     ) where
 
 import           Control.Monad.Logger        (runNoLoggingT)
---import           Control.Monad.Logger        (runStdoutLoggingT)
+import           Control.Monad.Logger        (runStdoutLoggingT)
 import qualified Data.Aeson                  as A
 import           Data.Pool                   (destroyAllResources)
 import           Database.Persist
@@ -54,7 +54,7 @@ import           Pantry.Storage              as PS (BlobId, HackageCabalId,
                                                     VersionId, unBlobKey)
 import qualified Pantry.Storage              as Pantry (migrateAll)
 import           Pantry.Types                (HasPantryConfig (..),
-                                              PantryConfig (..), Storage (..))
+                                              PantryConfig (..), Storage (..), Revision)
 import           RIO
 import           RIO.Time
 import           Types                       (CompilerP (..), FlagNameP,
@@ -88,8 +88,9 @@ SnapshotPackage
     snapshot SnapshotId
     packageName PackageNameId
     version VersionId
+    revision Revision Maybe
     cabal BlobId Maybe
-    hackageCabal HackageCabalId Maybe
+    treeBlob BlobId Maybe
     origin PackageOrigin
     originUrl Text
     synopsis Text
@@ -151,8 +152,8 @@ run inner = do
 
 openStackageDatabase :: MonadIO m => PostgresConf -> m Storage
 openStackageDatabase pg = liftIO $ do
-    fmap Storage $ runNoLoggingT $ createPostgresqlPool
-    --fmap Storage $ runStdoutLoggingT $ createPostgresqlPool
+    --fmap Storage $ runNoLoggingT $ createPostgresqlPool
+    fmap Storage $ runStdoutLoggingT $ createPostgresqlPool
       (pgConnStr pg)
       (pgPoolSize pg)
 

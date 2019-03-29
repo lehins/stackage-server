@@ -76,7 +76,7 @@ packagePage :: Maybe (SnapshotPackageInfo)
 packagePage mspi pname =
     track "Handler.Package.packagePage" $
     checkSpam pname $ do
-        maybe (getSnapshotLatestVersion pname) (return . Just) mspi >>= \case
+        maybe (getSnapshotPackageLatestVersion pname) (return . Just) mspi >>= \case
           Nothing -> notFound -- getHackageLatestVersion pname >>= maybe notFound return
           Just spi -> handleSnapshotPackage spi
 
@@ -84,18 +84,17 @@ handleSnapshotPackage :: SnapshotPackageInfo -> Handler Html
 handleSnapshotPackage spi = do
     (isDeprecated, inFavourOf) <- getDeprecated pname
     latests <- getLatests pname
-    (PackageInfo {..}, packageModules) <- getPackageInfo spi
+    PackageInfo {..} <- getPackageInfo spi
     deps <- map (first unPackageRev) <$> getForwardDeps spi (Just maxDisplayedDeps)
     revDeps <- map (first unPackageRev) <$> getReverseDeps spi (Just maxDisplayedDeps)
     (depsCount, revDepsCount) <- getDepsCount spi
     mhackageLatest <-
-        case spiHackageCabalInfo spi of
-            Just _ -> do
-                hciLatest <- getHackageLatestVersion pname >>= maybe notFound pure
-                let verRev = hciVersionRev hciLatest
-                pure $ Just (PackageIdentifierP pname (vrVersion verRev), verRev)
-            Nothing -> pure Nothing
-    let mdocs = Just (spiSnapName spi, piVersion, packageModules)
+        case spiOrigin spi of
+            Hackage -> do
+                mhciLatest <- getHackageLatestVersion pname -- >>= maybe notFound pure
+                pure mhciLatest
+            _ -> pure Nothing
+    let mdocs = Just (spiSnapName spi, piVersion, piModuleNames)
         mSnapName = Just $ spiSnapName spi
         mdisplayedVersion = Just $ spiVersionRev spi
         (packageDepsLink, packageRevDepsLink) =

@@ -24,6 +24,7 @@ module Types
     , FlagNameP(..)
     , PackageVersionRev(..)
     , ModuleNameP(..)
+    , SafeFilePath
     , moduleNameFromComponents
     , PackageIdentifierP(..)
     , PackageNameVersion(..)
@@ -212,6 +213,8 @@ instance ToMarkup PackageNameP where
     toMarkup = toMarkup . packageNameString . unPackageNameP
 instance SqlString PackageNameP
 
+instance SqlString SafeFilePath
+
 instance PathPiece VersionP where
     fromPathPiece = fmap VersionP . parseVersion . T.unpack
     toPathPiece v = textDisplay v
@@ -219,6 +222,7 @@ instance ToMarkup VersionP where
     toMarkup (VersionP v) = toMarkup $ versionString v
 instance ToBuilder VersionP Builder where
     toBuilder = getUtf8Builder . display
+instance SqlString VersionP
 
 keepMajorVersion :: VersionP -> VersionP
 keepMajorVersion pver@(VersionP ver) =

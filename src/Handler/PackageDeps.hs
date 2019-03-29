@@ -14,7 +14,7 @@ import Stackage.Database.Types (SnapshotPackageInfo(..))
 
 getPackageDepsR :: PackageNameP -> Handler Html
 getPackageDepsR pname = do
-    mspi <- getSnapshotLatestVersion pname
+    mspi <- getSnapshotPackageLatestVersion pname
     case mspi of
         Nothing -> redirect $ PackageR pname
         Just spi -> helper Deps spi
@@ -30,7 +30,7 @@ getSnapshotPackageDepsR snapName pnv =
 
 getPackageRevDepsR :: PackageNameP -> Handler Html
 getPackageRevDepsR pname = do
-    mspi <- getSnapshotLatestVersion pname
+    mspi <- getSnapshotPackageLatestVersion pname
     case mspi of
         Nothing -> redirect $ PackageR pname
         Just spi -> helper RevDeps spi
