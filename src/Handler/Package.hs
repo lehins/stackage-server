@@ -97,7 +97,7 @@ handleSnapshotPackage spi = do
     mhciLatest <-
         case spiOrigin spi of
             Hackage -> getHackageLatestVersion pname
-            _       -> pure Nothing
+            _ -> pure Nothing
     let mdocs = Just (spiSnapName spi, piVersion, piModuleNames)
         mSnapName = Just $ spiSnapName spi
         mdisplayedVersion = Just $ spiVersionRev spi

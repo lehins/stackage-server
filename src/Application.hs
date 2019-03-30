@@ -130,7 +130,7 @@ makeFoundation logFunc appSettings = do
             "master"
             loadWebsiteContent
 
-    appStackageDatabase <- openStackageDatabase PostgresConf
+    appStackageDatabase <- openStackageDatabase (appShouldLogAll appSettings) PostgresConf
       { pgPoolSize = 2
       , pgConnStr = encodeUtf8 $ appPostgresString appSettings
       }

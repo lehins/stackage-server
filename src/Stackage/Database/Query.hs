@@ -23,7 +23,6 @@ module Stackage.Database.Query
 
     -- * Package
 
-    -- , getPantryHackageCabal
     , getAllPackages
     , getPackagesForSnapshot
     , getPackageVersionForSnapshot
@@ -314,6 +313,7 @@ getHackageLatestVersion pname =
              on (hc ^. HackageCabalName ==. pn ^. PackageNameId)
              where_ (pn ^. PackageNameName ==. val pname)
              orderBy [desc (versionArray v), desc (hc ^. HackageCabalRevision)]
+             limit 1
              pure $
                  ( hc ^. HackageCabalId
                  , hc ^. HackageCabalCabal
@@ -325,7 +325,7 @@ getHackageLatestVersion pname =
             { hciCabalId = unValue cid
             , hciCabalBlobId = unValue cbid
             , hciPackageIdentifier = pname
-            , hciVersionRev = VersionRev (unValue v) (Just (unValue rev))
+            , hciVersionRev = toVersionRev (unValue v) (unValue rev)
             }
 
 
@@ -511,7 +511,7 @@ getModuleNames spid =
     map unValue <$>
     select
         (from $ \(spm `InnerJoin` pm) -> do
-             on $ (spm ^. SnapshotPackageModuleModule ==. pm ^. ModuleId)
+             on (spm ^. SnapshotPackageModuleModule ==. pm ^. ModuleId)
              where_ (spm ^. SnapshotPackageModuleSnapshotPackage ==. val spid)
              orderBy [desc (pm ^. ModuleName)]
              pure (pm ^. ModuleName))
@@ -522,8 +522,27 @@ getForwardDeps ::
        GetStackageDatabase env m
     => SnapshotPackageInfo
     -> Maybe Int
-    -> m [(PackageVersionRev, Text)]
-getForwardDeps spi mlimit = pure [] -- undefined
+    -> m [(PackageVersionRev, VersionRangeP)]
+getForwardDeps spi mlimit =
+    fmap toDepRange <$>
+    run (select $
+         from $ \(user `InnerJoin` uses `InnerJoin` pn `InnerJoin` v) -> do
+             on (uses ^. SnapshotPackageVersion ==. v ^. VersionId)
+             on (uses ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+             on (user ^. DepUses ==. uses ^. SnapshotPackagePackageName)
+             where_ $
+                 (user ^. DepUser ==. val (spiSnapshotPackageId spi)) &&.
+                 (uses ^. SnapshotPackageSnapshot ==. val (spiSnapshotId spi))
+             orderBy [desc (pn ^. PackageNameName)]
+             maybe (pure ()) (limit . fromIntegral) mlimit
+             pure
+                 ( pn ^. PackageNameName
+                 , v ^. VersionVersion
+                 , uses ^. SnapshotPackageRevision
+                 , user ^. DepRange))
+  where
+    toDepRange (pn, v, rev, range) =
+        (PackageVersionRev (unValue pn) (toVersionMRev (unValue v) (unValue rev)), unValue range)
 
 
 getForwardDepsCount :: MonadIO m => SnapshotPackageInfo -> ReaderT SqlBackend m Int
@@ -542,7 +561,7 @@ getReverseDeps ::
        GetStackageDatabase env m
     => SnapshotPackageInfo
     -> Maybe Int -- ^ Optionally limit number of dependencies
-    -> m [(PackageVersionRev, Text)]
+    -> m [(PackageVersionRev, VersionRangeP)]
 getReverseDeps spi mlimit = pure [] --undefined
 
 

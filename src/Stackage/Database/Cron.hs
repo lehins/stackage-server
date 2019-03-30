@@ -91,7 +91,7 @@ hackageDeprecatedUrl = "https://hackage.haskell.org/packages/deprecated.json"
 initStorage :: Int -> IO StackageDatabase
 initStorage poolSize = do
     connstr <- encodeUtf8 . T.pack <$> getEnv "PGSTRING"
-    openStackageDatabase PostgresConf {pgPoolSize = poolSize, pgConnStr = connstr}
+    openStackageDatabase False PostgresConf {pgPoolSize = poolSize, pgConnStr = connstr}
 
 
 getStackageSnapshotsDir :: RIO StackageCron FilePath

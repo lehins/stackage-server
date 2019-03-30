@@ -40,8 +40,7 @@ module Stackage.Database.Schema
     , module PS
     ) where
 
-import Control.Monad.Logger (runNoLoggingT)
---import Control.Monad.Logger (runStdoutLoggingT)
+import Control.Monad.Logger (runNoLoggingT, runStdoutLoggingT)
 import qualified Data.Aeson as A
 import Data.Pool (destroyAllResources)
 import Database.Persist
@@ -147,12 +146,14 @@ run inner = do
     runSqlPool inner pool
 
 
-openStackageDatabase :: MonadIO m => PostgresConf -> m Storage
-openStackageDatabase pg = liftIO $
-    fmap Storage $ runNoLoggingT $ createPostgresqlPool
-    --fmap Storage $ runStdoutLoggingT $ createPostgresqlPool
-      (pgConnStr pg)
-      (pgPoolSize pg)
+openStackageDatabase :: MonadIO m => Bool -> PostgresConf -> m Storage
+openStackageDatabase shouldLog pg =
+    liftIO $ do
+        Storage <$>
+            if shouldLog
+                then runStdoutLoggingT $ createPostgresqlPool (pgConnStr pg) (pgPoolSize pg)
+                else runNoLoggingT $ createPostgresqlPool (pgConnStr pg) (pgPoolSize pg)
+
 
 closeStackageDatabase :: GetStackageDatabase env m => m ()
 closeStackageDatabase = do

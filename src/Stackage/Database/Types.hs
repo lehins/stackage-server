@@ -30,6 +30,7 @@ module Stackage.Database.Types
     , VersionRev(..)
     , toRevMaybe
     , toVersionRev
+    , toVersionMRev
     , PackageVersionRev(..)
     , ModuleNameP(..)
     , SafeFilePath
@@ -213,8 +214,13 @@ data SnapshotPackageInfo = SnapshotPackageInfo
 toRevMaybe :: Revision -> Maybe Revision
 toRevMaybe rev = guard (rev /= Revision 0) >> Just rev
 
+-- | Add revision only if it is non-zero
 toVersionRev :: VersionP -> Revision -> VersionRev
 toVersionRev v = VersionRev v . toRevMaybe
+
+-- | Add revision only if it is present and is non-zero
+toVersionMRev :: VersionP -> Maybe Revision -> VersionRev
+toVersionMRev v mrev = VersionRev v (maybe Nothing toRevMaybe mrev)
 
 spiVersionRev :: SnapshotPackageInfo -> VersionRev
 spiVersionRev spi = VersionRev (spiVersion spi) (spiRevision spi >>= toRevMaybe)

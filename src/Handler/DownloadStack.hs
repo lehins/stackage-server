@@ -33,10 +33,10 @@ getLatestMatcher man = do
     val <- flip runReaderT man $ withResponse req
         $ \res -> runConduit $ responseBody res .| sinkParser json
     return $ \pattern' -> do
-        let pattern' = pattern' ++ "."
+        let pattern'' = pattern' ++ "."
         Object top <- return val
         Array assets <- lookup "assets" top
-        headMay $ preferZip $ mapMaybe (findMatch pattern') assets
+        headMay $ preferZip $ catMaybes $ map (findMatch pattern'') assets
   where
     findMatch pattern' (Object o) = do
         String name <- lookup "name" o
