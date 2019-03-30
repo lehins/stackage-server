@@ -23,13 +23,11 @@ getDownloadSnapshotsJsonR = track "Hoogle.Download.getDownloadSnapshotsJsonR"
     getDownloadLtsSnapshotsJsonR
 
 getDownloadLtsSnapshotsJsonR :: Handler Value
-getDownloadLtsSnapshotsJsonR = track "Hoogle.Download.getDownloadLtsSnapshotsJsonR" $
-    snapshotsJSON
+getDownloadLtsSnapshotsJsonR = track "Hoogle.Download.getDownloadLtsSnapshotsJsonR" snapshotsJSON
 
 -- Print the ghc major version for the given snapshot.
 ghcMajorVersionText :: Snapshot -> Text
-ghcMajorVersionText =
-    textDisplay . keepMajorVersion . ghcVersion . snapshotCompiler
+ghcMajorVersionText = textDisplay . keepMajorVersion . ghcVersion . snapshotCompiler
 
 getGhcMajorVersionR :: SnapName -> Handler Text
 getGhcMajorVersionR name = track "Hoogle.Download.getGhcMajorVersionR" $ do
@@ -37,15 +35,14 @@ getGhcMajorVersionR name = track "Hoogle.Download.getGhcMajorVersionR" $ do
     return $ ghcMajorVersionText $ entityVal snapshot
 
 getDownloadGhcLinksR :: SupportedArch -> Text -> Handler TypedContent
-getDownloadGhcLinksR arch fileName = track "Hoogle.Download.getDownloadGhcLinksR" $ do
-  ver <- maybe notFound return
-       $ stripPrefix "ghc-"
-         >=> stripSuffix "-links.yaml"
-         >=> ghcMajorVersionFromText
-       $ fileName
-  ghcLinks <- getYesod >>= fmap wcGhcLinks . liftIO . grContent . appWebsiteContent
-  case lookup (arch, ver) (ghcLinksMap ghcLinks) of
-    Just text -> return $ TypedContent yamlMimeType $ toContent text
-    Nothing -> notFound
+getDownloadGhcLinksR arch fileName =
+    track "Hoogle.Download.getDownloadGhcLinksR" $ do
+        ver <-
+            maybe notFound return $
+            stripPrefix "ghc-" >=> stripSuffix "-links.yaml" >=> ghcMajorVersionFromText $ fileName
+        ghcLinks <- getYesod >>= fmap wcGhcLinks . liftIO . grContent . appWebsiteContent
+        case lookup (arch, ver) (ghcLinksMap ghcLinks) of
+            Just text -> return $ TypedContent yamlMimeType $ toContent text
+            Nothing -> notFound
   where
     yamlMimeType = "text/yaml"

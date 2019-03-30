@@ -191,21 +191,21 @@ data Identifier
 --
 parseIdentitiesLiberally :: Text -> [Identifier]
 parseIdentitiesLiberally =
-  filter (not . emptyPlainText) .
-  map strip .
-  concatPlains .
-  map parseChunk .
-  T.split (== ',')
-  where emptyPlainText (PlainText e) = T.null e
-        emptyPlainText _             = False
-        strip (PlainText t) = PlainText (T.strip t)
-        strip x             = x
-        concatPlains = go
-          where go (PlainText x:PlainText y:xs) =
-                  go (PlainText (x <> "," <> y) :
-                      xs)
-                go (x:xs) = x : go xs
-                go [] = []
+    filter (not . emptyPlainText) .
+    map strip .
+    concatPlains .
+    map parseChunk .
+    T.split (== ',')
+    where emptyPlainText (PlainText e) = T.null e
+          emptyPlainText _             = False
+          strip (PlainText t) = PlainText (T.strip t)
+          strip x             = x
+          concatPlains = go
+            where go (PlainText x:PlainText y:xs) =
+                    go (PlainText (x <> "," <> y) :
+                        xs)
+                  go (x:xs) = x : go xs
+                  go [] = []
 
 -- | Try to parse a chunk into an identifier.
 --
@@ -224,25 +224,25 @@ parseIdentitiesLiberally =
 --
 parseChunk :: Text -> Identifier
 parseChunk chunk =
-  case emailAddress (T.encodeUtf8 (T.strip chunk)) of
-    Just email -> EmailOnly email
-    Nothing ->
-      case T.stripPrefix
-             ">"
-             (T.dropWhile isSpace
-                          (T.reverse chunk)) of
-        Just rest ->
-          case T.span (/= '<') rest of
-            (T.reverse -> emailStr,this) ->
-              case T.stripPrefix "< " this of
-                Just (T.reverse -> name) ->
-                  case emailAddress (T.encodeUtf8 (T.strip emailStr)) of
-                    Just email ->
-                      Contact (T.strip name) email
-                    _ -> plain
-                _ -> plain
-        _ -> plain
-  where plain = PlainText chunk
+    case emailAddress (T.encodeUtf8 (T.strip chunk)) of
+      Just email -> EmailOnly email
+      Nothing ->
+        case T.stripPrefix
+               ">"
+               (T.dropWhile isSpace
+                            (T.reverse chunk)) of
+          Just rest ->
+            case T.span (/= '<') rest of
+              (T.reverse -> emailStr,this) ->
+                case T.stripPrefix "< " this of
+                  Just (T.reverse -> name) ->
+                    case emailAddress (T.encodeUtf8 (T.strip emailStr)) of
+                      Just email ->
+                        Contact (T.strip name) email
+                      _ -> plain
+                  _ -> plain
+          _ -> plain
+    where plain = PlainText chunk
 
 -- | Render email to text.
 renderEmail :: EmailAddress -> Text
@@ -258,5 +258,4 @@ getPackageSnapshotsR pn =
                 $(widgetFile "package-snapshots"))
 
 renderNoPackages :: Int -> Text
-renderNoPackages n =
-  T.pack $ show n ++ " package" ++ (if n == 1 then "" else "s")
+renderNoPackages n = T.pack $ show n ++ " package" ++ if n == 1 then "" else "s"
