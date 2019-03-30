@@ -337,36 +337,6 @@ getSnapshotPackageInfo snapName pname =
              where_ ((s ^. SnapshotName ==. val snapName) &&. (pn ^. PackageNameName ==. val pname))
              pure ((), spiQ))
 
-
---       fmap toSnapshotPackageInfo . listToMaybe <$>
-  --           select
-  --               (from $ \(sp `InnerJoin` s `InnerJoin` pn `InnerJoin` v) -> do
-  --                    on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
-  --                    on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
-  --                    on (sp ^. SnapshotPackageSnapshot ==. s ^. SnapshotId)
-  --                    where_
-  --                        ((s ^. SnapshotName ==. val snapName) &&.
-  --                         (pn ^. PackageNameName ==. val pname))
-  --                    pure
-  --                        ( sp ^. SnapshotPackageId
-  --                        , s ^. SnapshotId
-  --                        , sp ^. SnapshotPackageCabal
-  --                        , v ^. VersionVersion
-  --                        , sp ^. SnapshotPackageRevision
-  --                        , sp ^. SnapshotPackageOrigin))
-  -- where
-  --   toSnapshotPackageInfo (spid, sid, spc, v, spr, spo) =
-  --       SnapshotPackageInfo
-  --           { spiSnapshotPackageId = unValue spid
-  --           , spiSnapshotId = unValue sid
-  --           , spiCabalBlobId = unValue spc
-  --           , spiSnapName = snapName
-  --           , spiPackageName = pname
-  --           , spiVersion = unValue v
-  --           , spiRevision = unValue spr
-  --           , spiOrigin = unValue spo
-  --           }
-
 type SqlExprSPI
      = ( SqlExpr (Value SnapshotPackageId)
        , SqlExpr (Value SnapshotId)
@@ -549,7 +519,16 @@ getForwardDepsCount :: MonadIO m => SnapshotPackageInfo -> ReaderT SqlBackend m 
 getForwardDepsCount spi = P.count [DepUser P.==. spiSnapshotPackageId spi]
 
 getReverseDepsCount :: MonadIO m => SnapshotPackageInfo -> ReaderT SqlBackend m Int
-getReverseDepsCount spi = pure 0 -- undefined
+getReverseDepsCount spi =
+    fromMaybe 0 <$>
+    selectApplyMaybe unValue
+        (from $ \(sp `InnerJoin` dep `InnerJoin` curPn) -> do
+             on (dep ^. DepUses ==. curPn ^. PackageNameId)
+             on (sp ^. SnapshotPackageId ==. dep ^. DepUser)
+             where_ $
+                 (curPn ^. PackageNameName ==. val (spiPackageName spi)) &&.
+                 (sp ^. SnapshotPackageSnapshot ==. val (spiSnapshotId spi))
+             pure countRows)
 
 getDepsCount :: GetStackageDatabase env m => SnapshotPackageInfo -> m (Int, Int)
 getDepsCount spi =
@@ -562,7 +541,29 @@ getReverseDeps ::
     => SnapshotPackageInfo
     -> Maybe Int -- ^ Optionally limit number of dependencies
     -> m [(PackageVersionRev, VersionRangeP)]
-getReverseDeps spi mlimit = pure [] --undefined
+getReverseDeps spi mlimit =
+    fmap toDepRange <$>
+    run (select $
+         from $ \(sp `InnerJoin` dep `InnerJoin` pn `InnerJoin` v `InnerJoin` curPn) -> do
+             on (dep ^. DepUses ==. curPn ^. PackageNameId)
+             on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
+             on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+             on (sp ^. SnapshotPackageId ==. dep ^. DepUser)
+             where_ $
+                 (curPn ^. PackageNameName ==. val (spiPackageName spi)) &&.
+                 (sp ^. SnapshotPackageSnapshot ==. val (spiSnapshotId spi))
+             orderBy [desc (pn ^. PackageNameName)]
+             maybe (pure ()) (limit . fromIntegral) mlimit
+             pure
+                 ( pn ^. PackageNameName
+                 , v ^. VersionVersion
+                 , sp ^. SnapshotPackageRevision
+                 , dep ^. DepRange))
+  where
+    toDepRange (pn, v, rev, range) =
+        (PackageVersionRev (unValue pn) (toVersionMRev (unValue v) (unValue rev)), unValue range)
+
+
 
 
 ----- Deprecated
