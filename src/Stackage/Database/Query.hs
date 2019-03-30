@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
@@ -66,8 +67,8 @@ import qualified Data.Aeson as A
 import Data.Bifunctor (bimap)
 import qualified Data.List as L
 import Database.Esqueleto
-import Database.Esqueleto.Internal.Sql
 import Database.Esqueleto.Internal.Language (FromPreprocess)
+import Database.Esqueleto.Internal.Sql
 import qualified Database.Persist as P
 import Pantry.Storage (EntityField(..), PackageName, Unique(..), Version,
                        getPackageNameById, getPackageNameId, getTreeForKey,
@@ -295,13 +296,38 @@ getAllPackages :: GetStackageDatabase env m => m [(PackageNameP, VersionP, Text)
 getAllPackages = undefined
 
 getPackagesForSnapshot :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
-getPackagesForSnapshot sid = undefined
+getPackagesForSnapshot snapshotId =
+    run (map toPackageListingInfo <$>
+         select
+             (from $ \(sp `InnerJoin` pn `InnerJoin` v) -> do
+                  on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
+                  on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+                  where_ (sp ^. SnapshotPackageSnapshot ==. val snapshotId)
+                  orderBy [asc (pn ^. PackageNameName)]
+                  pure
+                      ( pn ^. PackageNameName
+                      , v ^. VersionVersion
+                      , sp ^. SnapshotPackageSynopsis
+                      , sp ^. SnapshotPackageOrigin)))
+  where
+    toPackageListingInfo (Value pliName, Value pliVersion, Value pliSynopsis, Value pliOrigin) =
+        PackageListingInfo {pliName, pliVersion, pliSynopsis, pliOrigin}
 
 
 getPackageVersionForSnapshot
   :: GetStackageDatabase env m
   => SnapshotId -> PackageNameP -> m (Maybe VersionP)
-getPackageVersionForSnapshot snapshotId pname = undefined
+getPackageVersionForSnapshot snapshotId pname =
+    run $
+    selectApplyMaybe
+        unValue
+        (from $ \(sp `InnerJoin` pn `InnerJoin` v) -> do
+             on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
+             on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+             where_
+                 ((sp ^. SnapshotPackageSnapshot ==. val snapshotId) &&.
+                  (pn ^. PackageNameName ==. val pname))
+             pure (v ^. VersionVersion))
 
 getLatest ::
        (FromPreprocess SqlQuery SqlExpr SqlBackend t, MonadIO m)
@@ -382,7 +408,7 @@ getSnapshotPackagePageInfo spi maxDisplayedDeps =
         mhciLatest <-
             case spiOrigin spi of
                 Hackage -> getHackageLatestVersion $ spiPackageName spi
-                _ -> pure Nothing
+                _       -> pure Nothing
         forwardDepsCount <- getForwardDepsCount spi
         reverseDepsCount <- getReverseDepsCount spi
         forwardDeps <-
@@ -427,7 +453,7 @@ type SqlExprSPI
        , SqlExpr (Value (Maybe BlobId))
        , SqlExpr (Value VersionP)
        , SqlExpr (Value (Maybe Revision))
-       , SqlExpr (Value PackageOrigin)
+       , SqlExpr (Value Origin)
        , SqlExpr (Value (Maybe TreeEntryId))
        , SqlExpr (Value (Maybe TreeEntryId))
        )
@@ -715,7 +741,7 @@ addSnapshotPackage ::
        (MonadIO m, MonadReader env m, HasLogFunc env)
     => SnapshotId
     -> CompilerP
-    -> PackageOrigin
+    -> Origin
     -> Maybe (Entity Tree)
     -> Maybe HackageCabalId
     -> Bool

@@ -54,7 +54,7 @@ import Pantry.Types (HasPantryConfig(..), PantryConfig(..), Revision,
                      Storage(..))
 import RIO
 import RIO.Time
-import Types (CompilerP(..), FlagNameP, ModuleNameP, PackageOrigin, SnapName,
+import Types (CompilerP(..), FlagNameP, ModuleNameP, Origin, SnapName,
               VersionRangeP)
 
 currentSchema :: Int
@@ -87,7 +87,7 @@ SnapshotPackage
     revision Revision Maybe
     cabal BlobId Maybe
     treeBlob BlobId Maybe
-    origin PackageOrigin
+    origin Origin
     originUrl Text
     synopsis Text
     readme TreeEntryId Maybe

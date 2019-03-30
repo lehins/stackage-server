@@ -41,7 +41,7 @@ module Types
     , SupportedArch(..)
     , Year
     , Month(Month)
-    , PackageOrigin(..)
+    , Origin(..)
     ) where
 
 import ClassyPrelude.Yesod (ToBuilder(..))
@@ -467,7 +467,7 @@ parseFlagNameP :: Text -> Either String FlagNameP
 parseFlagNameP = bimap displayException FlagNameP . dtParse
 
 
-data PackageOrigin
+data Origin
     = Core
     | Hackage
     | Archive
@@ -475,8 +475,7 @@ data PackageOrigin
     | HgRepo
     deriving (Show, Eq)
 
-
-instance PersistField PackageOrigin where
+instance PersistField Origin where
     toPersistValue =
         toPersistValue . \case
             Core    -> 0 :: Int64
@@ -492,6 +491,14 @@ instance PersistField PackageOrigin where
             3 -> Right GitRepo
             4 -> Right HgRepo
             n -> Left $ "Unknown origin type: " <> textDisplay (n :: Int64)
-instance PersistFieldSql PackageOrigin where
+
+instance PersistFieldSql Origin where
     sqlType _ = SqlInt64
 
+instance ToJSON Origin where
+    toJSON = \case
+      Core    -> "core"
+      Hackage -> "hackage"
+      Archive -> "archive"
+      GitRepo -> "git"
+      HgRepo  -> "mercurial"

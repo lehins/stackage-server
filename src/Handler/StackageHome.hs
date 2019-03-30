@@ -127,7 +127,7 @@ getStackageCabalConfigR name = track "Handler.StackageHome.getStackageCabalConfi
     asHttp s = error $ "Unexpected url prefix: " <> unpack s
 
     constraint p
-        | pliIsCore p = toBuilder $ asText " installed"
+        | pliOrigin p == Core = toBuilder $ asText " installed"
         | otherwise = toBuilder (asText " ==") ++
                       toBuilder (pliVersion p)
 

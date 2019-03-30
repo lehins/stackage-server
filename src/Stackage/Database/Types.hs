@@ -36,7 +36,7 @@ module Stackage.Database.Types
     , dropVersionRev
     , ModuleNameP(..)
     , SafeFilePath
-    , PackageOrigin(..)
+    , Origin(..)
     , LatestInfo(..)
     , Deprecation(..)
     , haddockBucketName
@@ -179,7 +179,7 @@ data PackageListingInfo = PackageListingInfo
     { pliName     :: !PackageNameP
     , pliVersion  :: !VersionP
     , pliSynopsis :: !Text
-    , pliIsCore   :: !Bool
+    , pliOrigin   :: !Origin
     } deriving Show
 
 
@@ -189,7 +189,7 @@ instance ToJSON PackageListingInfo where
             [ "name"     .= pliName
             , "version"  .= pliVersion
             , "synopsis" .= pliSynopsis
-            , "isCore"   .= pliIsCore
+            , "origin"   .= pliOrigin
             ]
 
 
@@ -208,7 +208,7 @@ data SnapshotPackageInfo = SnapshotPackageInfo
     , spiPackageName       :: !PackageNameP
     , spiVersion           :: !VersionP
     , spiRevision          :: !(Maybe Revision)
-    , spiOrigin            :: !PackageOrigin
+    , spiOrigin            :: !Origin
     , spiReadme            :: !(Maybe TreeEntryId)
     , spiChangelog         :: !(Maybe TreeEntryId)
     } deriving (Show, Eq)
