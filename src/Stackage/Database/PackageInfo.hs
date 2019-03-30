@@ -10,59 +10,41 @@ module Stackage.Database.PackageInfo
     , isMarkdownFilePath
     ) where
 
-import           CMarkGFM
-import           Data.Coerce
-import           Data.Map.Merge.Strict                  as Map
-import qualified Data.Text                              as T
-import           Data.Text.Encoding                     (decodeUtf8With)
-import           Data.Text.Encoding.Error               (lenientDecode)
-import           Distribution.Compiler                  (CompilerFlavor (GHC))
-import           Distribution.Package                   (Dependency (..),
-                                                         PackageIdentifier (..))
-import           Distribution.PackageDescription        (CondTree (..),
-                                                         Condition (..),
-                                                         ConfVar (..),
-                                                         Flag (flagDefault, flagName),
-                                                         FlagName,
-                                                         GenericPackageDescription,
-                                                         author,
-                                                         condExecutables,
-                                                         condLibrary,
-                                                         description,
-                                                         genPackageFlags,
-                                                         homepage, license,
-                                                         maintainer, package,
-                                                         packageDescription,
-                                                         synopsis)
-import           Distribution.PackageDescription.Parsec (parseGenericPackageDescription,
-                                                         runParseResult)
-import           Distribution.Pretty                    (prettyShow)
-import           Distribution.System                    (Arch (X86_64),
-                                                         OS (Linux))
-import           Distribution.Types.CondTree            (CondBranch (..))
-import           Distribution.Types.Library             (exposedModules)
-import           Distribution.Types.VersionRange        (VersionRange,
-                                                         intersectVersionRanges,
-                                                         normaliseVersionRange,
-                                                         withinRange)
-import           Distribution.Version                   (simplifyVersionRange)
-import           Pantry.Types                           (unSafeFilePath)
-import           RIO
-import qualified RIO.Map                                as Map
-import qualified RIO.Map.Unchecked                      as Map (mapKeysMonotonic)
-import           Stackage.Database.Haddock              (renderHaddock)
-import           Stackage.Database.Types                (Changelog (..),
-                                                         Readme (..))
-import           Text.Blaze.Html                        (Html, preEscapedToHtml,
-                                                         toHtml)
-import           Types                                  (CompilerP (..),
-                                                         FlagNameP (..),
-                                                         ModuleNameP (..),
-                                                         PackageNameP (..),
-                                                         SafeFilePath,
-                                                         VersionP (..),
-                                                         VersionRangeP (..))
-import           Yesod.Form.Fields                      (Textarea (..))
+import CMarkGFM
+import Data.Coerce
+import Data.Map.Merge.Strict as Map
+import qualified Data.Text as T
+import Data.Text.Encoding (decodeUtf8With)
+import Data.Text.Encoding.Error (lenientDecode)
+import Distribution.Compiler (CompilerFlavor(GHC))
+import Distribution.Package (Dependency(..), PackageIdentifier(..))
+import Distribution.PackageDescription (CondTree(..), Condition(..),
+                                        ConfVar(..),
+                                        Flag(flagDefault, flagName), FlagName,
+                                        GenericPackageDescription, author,
+                                        condExecutables, condLibrary,
+                                        description, genPackageFlags, homepage,
+                                        license, maintainer, package,
+                                        packageDescription, synopsis)
+import Distribution.PackageDescription.Parsec (parseGenericPackageDescription,
+                                               runParseResult)
+import Distribution.Pretty (prettyShow)
+import Distribution.System (Arch(X86_64), OS(Linux))
+import Distribution.Types.CondTree (CondBranch(..))
+import Distribution.Types.Library (exposedModules)
+import Distribution.Types.VersionRange (VersionRange, intersectVersionRanges,
+                                        normaliseVersionRange, withinRange)
+import Distribution.Version (simplifyVersionRange)
+import Pantry.Types (unSafeFilePath)
+import RIO
+import qualified RIO.Map as Map
+import qualified RIO.Map.Unchecked as Map (mapKeysMonotonic)
+import Stackage.Database.Haddock (renderHaddock)
+import Stackage.Database.Types (Changelog(..), Readme(..))
+import Text.Blaze.Html (Html, preEscapedToHtml, toHtml)
+import Types (CompilerP(..), FlagNameP(..), ModuleNameP(..), PackageNameP(..),
+              SafeFilePath, VersionP(..), VersionRangeP(..))
+import Yesod.Form.Fields (Textarea(..))
 
 data PackageInfo = PackageInfo
     { piName        :: !PackageNameP

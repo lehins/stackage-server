@@ -1,12 +1,13 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE CPP                        #-}
-{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase                 #-}
-{-# LANGUAGE MultiParamTypeClasses      #-}
-{-# LANGUAGE NoImplicitPrelude          #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
-{-# LANGUAGE ViewPatterns               #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns #-}
 module Types
     ( SnapName (..)
     , isLts
@@ -43,35 +44,31 @@ module Types
     , PackageOrigin(..)
     ) where
 
-import           ClassyPrelude.Yesod                  (ToBuilder (..))
-import           Control.Monad.Catch                  (MonadThrow, throwM)
-import           Data.Aeson
-import           Data.Bifunctor                       (bimap)
-import           Data.Char                            (ord)
-import           Data.Hashable                        (hashUsing, hashWithSalt)
-import qualified Data.Text                            as T
-import qualified Data.Text.Read                       as Reader
-import           Data.Typeable
-import           Database.Esqueleto.Internal.Language
-import           Database.Persist
-import           Database.Persist.Sql                 (PersistFieldSql (sqlType))
-import qualified Distribution.ModuleName              as DT (ModuleName,
-                                                             components,
-                                                             fromComponents,
-                                                             validModuleComponent)
-import           Distribution.PackageDescription      (FlagName,
-                                                       GenericPackageDescription)
-import qualified Distribution.Text                    as DT (Text, display,
-                                                             simpleParse)
-import           Distribution.Types.VersionRange      (VersionRange)
-import           Distribution.Version                 (mkVersion,
-                                                       versionNumbers)
-import           Pantry.Types                         hiding (Archive)
-import           RIO
-import qualified RIO.Map                              as Map
-import           RIO.Time                             (Day)
-import           Text.Blaze                           (ToMarkup (..))
-import           Web.PathPieces
+import ClassyPrelude.Yesod (ToBuilder(..))
+import Control.Monad.Catch (MonadThrow, throwM)
+import Data.Aeson
+import Data.Bifunctor (bimap)
+import Data.Char (ord)
+import Data.Hashable (hashUsing, hashWithSalt)
+import qualified Data.Text as T
+import qualified Data.Text.Read as Reader
+import Data.Typeable
+import Database.Esqueleto.Internal.Language
+import Database.Persist
+import Database.Persist.Sql (PersistFieldSql(sqlType))
+import qualified Distribution.ModuleName as DT (ModuleName, components,
+                                                fromComponents,
+                                                validModuleComponent)
+import Distribution.PackageDescription (FlagName, GenericPackageDescription)
+import qualified Distribution.Text as DT (Text, display, simpleParse)
+import Distribution.Types.VersionRange (VersionRange)
+import Distribution.Version (mkVersion, versionNumbers)
+import Pantry.Types hiding (Archive)
+import RIO
+import qualified RIO.Map as Map
+import RIO.Time (Day)
+import Text.Blaze (ToMarkup(..))
+import Web.PathPieces
 
 data ParseFailedException = ParseFailedException !TypeRep !String
     deriving (Show, Typeable)

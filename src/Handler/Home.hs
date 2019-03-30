@@ -1,6 +1,8 @@
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
 module Handler.Home
     ( getHomeR
     , getAuthorsR

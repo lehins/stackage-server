@@ -1,14 +1,16 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Handler.Blog
   ( getBlogHomeR
   , getBlogPostR
   , getBlogFeedR
   ) where
 
-import Import
 import Data.WebsiteContent
-import Yesod.GitRepo (grContent)
+import Import
 import Yesod.AtomFeed (atomLink)
+import Yesod.GitRepo (grContent)
 
 getPosts :: Handler (Vector Post)
 getPosts = do
@@ -17,14 +19,14 @@ getPosts = do
   mpreview <- lookupGetParam "preview"
   case mpreview of
     Just "true" -> return posts
-    _ -> return $ filter (\p -> postTime p <= now) posts
+    _           -> return $ filter (\p -> postTime p <= now) posts
 
 getAddPreview :: Handler (Route App -> (Route App, [(Text, Text)]))
 getAddPreview = do
   mpreview <- lookupGetParam "preview"
   case mpreview of
     Just "true" -> return $ \route -> (route, [("preview", "true")])
-    _ -> return $ \route -> (route, [])
+    _           -> return $ \route -> (route, [])
 
 postYear :: Post -> Year
 postYear p =

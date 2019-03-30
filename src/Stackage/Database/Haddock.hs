@@ -3,12 +3,14 @@ module Stackage.Database.Haddock
     ( renderHaddock
     ) where
 
+import ClassyPrelude.Conduit
+import qualified Documentation.Haddock.Parser as Haddock
+import Documentation.Haddock.Types (DocH(..), Example(..), Header(..),
+                                    Hyperlink(..), MetaDoc(..), Picture(..),
+                                    Table(..), TableCell(..), TableRow(..))
+import Text.Blaze.Html (Html, toHtml)
 import qualified Text.Blaze.Html5 as H
 import qualified Text.Blaze.Html5.Attributes as A
-import qualified Documentation.Haddock.Parser as Haddock
-import Documentation.Haddock.Types (DocH (..), Hyperlink (..), Picture (..), Header (..), Example (..), MetaDoc(..), Table (..), TableRow (..), TableCell (..))
-import ClassyPrelude.Conduit
-import Text.Blaze.Html (Html, toHtml)
 
 renderHaddock :: String -> Html
 renderHaddock = hToHtml . Haddock.toRegular . _doc . Haddock.parseParas

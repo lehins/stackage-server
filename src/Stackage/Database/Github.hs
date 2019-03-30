@@ -6,11 +6,11 @@ module Stackage.Database.Github
     ) where
 
 import qualified Data.ByteString.Lazy.Char8 as LBS8
-import           RIO
-import           RIO.Directory
-import           RIO.FilePath
-import           RIO.Process
-import           RIO.Time
+import RIO
+import RIO.Directory
+import RIO.FilePath
+import RIO.Process
+import RIO.Time
 
 
 gitLog
@@ -52,7 +52,7 @@ cloneOrUpdate root org name = do
         then withWorkingDir dest $ do
             proc "git" ["fetch"] runProcess_
             proc "git" ["reset", "--hard", "origin/master"] runProcess_
-        else withWorkingDir root $ do
+        else withWorkingDir root $
             proc "git" ["clone", url, name] runProcess_
     return dest
   where

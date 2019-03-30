@@ -1,6 +1,8 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE PartialTypeSignatures #-}
+{-# LANGUAGE ViewPatterns #-}
 module Stackage.Snapshot.Diff
   ( getSnapshotDiff
   , snapshotDiff
@@ -11,17 +13,18 @@ module Stackage.Snapshot.Diff
   , WithSnapshotNames(..)
   ) where
 
-import           ClassyPrelude (sortOn, toCaseFold)
-import           Data.Aeson
-import           Data.Align
+import ClassyPrelude (sortOn, toCaseFold)
+import Data.Aeson
+import Data.Align
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as T (commonPrefixes)
-import           Data.These
-import           RIO
-import           Stackage.Database (SnapshotId, GetStackageDatabase, getPackagesForSnapshot)
-import           Stackage.Database.Types (SnapName, PackageListingInfo(..))
-import           Types
-import           Web.PathPieces
+import Data.These
+import RIO
+import Stackage.Database (GetStackageDatabase, SnapshotId,
+                          getPackagesForSnapshot)
+import Stackage.Database.Types (PackageListingInfo(..), SnapName)
+import Types
+import Web.PathPieces
 
 data WithSnapshotNames a
     = WithSnapshotNames SnapName SnapName a
@@ -42,12 +45,14 @@ toDiffList = sortOn (toCaseFold . textDisplay . fst) . HashMap.toList . unSnapsh
 versionPrefix :: VersionChange -> Maybe (Text, Text, Text)
 versionPrefix vc = case unVersionChange vc of
         These va vb -> T.commonPrefixes (textDisplay va) (textDisplay vb)
-        _ -> Nothing
+        _           -> Nothing
 
-versionedDiffList :: [(PackageNameP, VersionChange)] -> [(PackageNameP, VersionChange, Maybe (Text, Text, Text))]
+versionedDiffList ::
+       [(PackageNameP, VersionChange)] -> [(PackageNameP, VersionChange, Maybe (Text, Text, Text))]
 versionedDiffList = map withPrefixedVersion
   where
-    withPrefixedVersion (packageName, versionChange) = (packageName, versionChange, versionPrefix versionChange)
+    withPrefixedVersion (packageName, versionChange) =
+        (packageName, versionChange, versionPrefix versionChange)
 
 
 toVersionedDiffList :: SnapshotDiff -> [(PackageNameP, VersionChange, Maybe (Text, Text, Text))]

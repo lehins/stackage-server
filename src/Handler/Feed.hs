@@ -1,12 +1,13 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE QuasiQuotes #-}
 module Handler.Feed
     ( getFeedR
     , getBranchFeedR
     ) where
 
+import Data.These
 import Import
 import Stackage.Database
-import Data.These
 import Stackage.Snapshot.Diff
 import Text.Blaze (text)
 
@@ -33,7 +34,7 @@ mkFeed mBranch snaps = do
             }
     updated <-
         case entries of
-            [] -> liftIO getCurrentTime
+            []  -> liftIO getCurrentTime
             x:_ -> return $ feedEntryUpdated x
     newsFeed Feed
         { feedTitle = title
@@ -47,8 +48,8 @@ mkFeed mBranch snaps = do
         , feedLogo = Nothing
         }
   where
-    branchTitle NightlyBranch = "Nightly"
-    branchTitle LtsBranch     = "LTS"
+    branchTitle NightlyBranch      = "Nightly"
+    branchTitle LtsBranch          = "LTS"
     branchTitle (LtsMajorBranch x) = "LTS-" <> tshow x
     title = "Recent Stackage " <> maybe "" branchTitle mBranch <> " snapshots"
 

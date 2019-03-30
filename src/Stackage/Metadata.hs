@@ -1,22 +1,20 @@
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Stackage.Metadata () where
 
-import           Control.Applicative           ((<$>), (<*>))
-import           Data.Aeson                    (FromJSON (..), ToJSON (..),
-                                                object, withObject, (.:), (.=))
-import           Data.Map                      (Map)
-import qualified Data.Map                      as Map
-import           Data.Set                      (Set)
-import qualified Data.Set                      as Set
-import           Data.Text                     (Text)
-import           Data.Typeable                 (Typeable)
-import           Distribution.Types.Version    (Version)
-import           Distribution.Package          (PackageName)
-import           Distribution.Version          (VersionRange)
-import           Prelude                       hiding (pi)
-import           Stackage.PackageIndex.Conduit (parseDistText, renderDistText)
-import           Pantry.Types (PackageNameP(..), VersionP(..))
+import Control.Applicative ((<$>), (<*>))
+import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.=))
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Text (Text)
+import Data.Typeable (Typeable)
+import Distribution.Types.Version (Version)
+import Distribution.Version (VersionRange)
+import Pantry.Types (PackageNameP(..), VersionP(..))
+import Prelude hiding (pi)
+import Stackage.PackageIndex.Conduit (parseDistText, renderDistText)
 
 data PackageInfo = PackageInfo
     { piLatest          :: !Version

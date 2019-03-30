@@ -1,5 +1,9 @@
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
 module Handler.StackageHome
     ( getStackageHomeR
     , getStackageDiffR
@@ -8,11 +12,13 @@ module Handler.StackageHome
     , getSnapshotPackagesR
     ) where
 
-import Import
+import Data.Ord
 import Data.These
 import Data.Time (FormatTime)
+import Import
 import Stackage.Database
-import Stackage.Database.Types (ModuleListingInfo(..), PackageListingInfo(..), isLts)
+import Stackage.Database.Types (ModuleListingInfo(..), PackageListingInfo(..),
+                                isLts)
 import Stackage.Snapshot.Diff
 
 getStackageHomeR :: SnapName -> Handler TypedContent
@@ -28,7 +34,7 @@ getStackageHomeR name =
         packages <- getPackagesForSnapshot sid
         let packageCount = length packages
         selectRep $ do
-            provideRep $ do
+            provideRep $
                 defaultLayout $ do
                     setTitle $ toHtml $ snapshotTitle snapshot
                     $(widgetFile "stackage-home")
@@ -50,7 +56,7 @@ getStackageDiffR name1 name2 = track "Handler.StackageHome.getStackageDiffR" $ d
     Entity sid1 _ <- lookupSnapshot name1 >>= maybe notFound return
     Entity sid2 _ <- lookupSnapshot name2 >>= maybe notFound return
     (map (snapshotName . entityVal) -> snapNames) <- getSnapshots Nothing 0 0
-    let (ltsSnaps, nightlySnaps) = partition isLts $ reverse $ sort snapNames
+    let (ltsSnaps, nightlySnaps) = partition isLts $ sortOn Down snapNames
     snapDiff <- getSnapshotDiff sid1 sid2
     selectRep $ do
         provideRep $ defaultLayout $ do

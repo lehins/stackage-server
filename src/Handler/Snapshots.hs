@@ -1,12 +1,14 @@
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Handler.Snapshots where
 
-import           Data.Time.Clock
-import           Import
-import           Stackage.Database
+import Data.Time.Clock
+import Import
+import Stackage.Database
 
 snapshotsPerPage :: Integral a => a
 snapshotsPerPage = 50

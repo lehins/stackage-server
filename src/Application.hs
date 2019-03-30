@@ -1,6 +1,11 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ViewPatterns #-}
+
 module Application
     ( getApplicationDev
     , appMain
@@ -14,61 +19,59 @@ module Application
     , handler
     ) where
 
-import           RIO (LogFunc, newLogFunc, withLogFunc, logOptionsHandle, LogOptions)
-import           RIO.Prelude.Simple (runSimpleApp)
-import Control.Monad.Logger                 (liftLoc)
-import Language.Haskell.TH.Syntax           (qLocation)
-import           Control.Concurrent (forkIO)
-import           Data.WebsiteContent
-import           Import hiding (catch)
-import           Network.Wai (Middleware, rawPathInfo)
-import Network.Wai.Handler.Warp             (Settings, defaultSettings,
-                                             defaultShouldDisplayException,
-                                             runSettings, setHost,
-                                             setOnException, setPort, getPort)
-import           Network.Wai.Middleware.ForceSSL (forceSSL)
-import           Network.Wai.Middleware.RequestLogger
-    ( mkRequestLogger, outputFormat, OutputFormat (..), IPAddrSource (..), destination
-    , Destination (Logger)
-    )
-import           System.Log.FastLogger (newStdoutLoggerSet, defaultBufSize, toLogStr)
-import           Yesod.Core.Types (loggerSet)
-import           Yesod.Default.Config2
-import           Yesod.Default.Handlers
-import           Yesod.GitRepo
+import Control.AutoUpdate
+import Control.Concurrent (forkIO)
+import Control.Concurrent (threadDelay)
+import Control.Monad.Logger (liftLoc)
+import Data.WebsiteContent
 import Database.Persist.Postgresql (PostgresConf(..))
-import           System.Process (rawSystem)
-import           Stackage.Database (openStackageDatabase)
-import           Stackage.Database.Cron (newHoogleLocker, singleRun)
-import           Stackage.Database.Github (getStackageContentDir)
-import           Control.AutoUpdate
-import           Control.Concurrent (threadDelay)
-import           Yesod.GitRev (tGitRev)
+import Import hiding (catch)
+import Language.Haskell.TH.Syntax (qLocation)
+import Network.Wai (Middleware, rawPathInfo)
+import Network.Wai.Handler.Warp (Settings, defaultSettings,
+                                 defaultShouldDisplayException, getPort,
+                                 runSettings, setHost, setOnException, setPort)
+import Network.Wai.Middleware.ForceSSL (forceSSL)
+import Network.Wai.Middleware.RequestLogger (Destination(Logger),
+                                             IPAddrSource(..), OutputFormat(..),
+                                             destination, mkRequestLogger,
+                                             outputFormat)
+import RIO (LogFunc, LogOptions, logOptionsHandle, newLogFunc, withLogFunc)
+import RIO.Prelude.Simple (runSimpleApp)
+import Stackage.Database (openStackageDatabase)
+import Stackage.Database.Cron (newHoogleLocker, singleRun)
+import Stackage.Database.Github (getStackageContentDir)
+import System.Log.FastLogger (defaultBufSize, newStdoutLoggerSet, toLogStr)
+import Yesod.Core.Types (loggerSet)
+import Yesod.Default.Config2
+import Yesod.Default.Handlers
+import Yesod.GitRepo
+import Yesod.GitRev (tGitRev)
 
 -- Import all relevant handler modules here.
-import           Handler.Home
-import           Handler.Snapshots
-import           Handler.StackageHome
-import           Handler.StackageIndex
-import           Handler.StackageSdist
-import           Handler.System
-import           Handler.Haddock
-import           Handler.Package
-import           Handler.PackageDeps
-import           Handler.PackageList
-import           Handler.Hoogle
-import           Handler.Sitemap
-import           Handler.BuildPlan
-import           Handler.Download
-import           Handler.OldLinks
-import           Handler.Feed
-import           Handler.DownloadStack
-import           Handler.MirrorStatus
-import           Handler.Blog
+import Handler.Blog
+import Handler.BuildPlan
+import Handler.Download
+import Handler.DownloadStack
+import Handler.Feed
+import Handler.Haddock
+import Handler.Home
+import Handler.Hoogle
+import Handler.MirrorStatus
+import Handler.OldLinks
+import Handler.Package
+import Handler.PackageDeps
+import Handler.PackageList
+import Handler.Sitemap
+import Handler.Snapshots
+import Handler.StackageHome
+import Handler.StackageIndex
+import Handler.StackageSdist
+import Handler.System
 
---import           Network.Wai.Middleware.Prometheus (prometheus)
---import           Prometheus (register)
---import           Prometheus.Metric.GHC (ghcMetrics)
+--import Network.Wai.Middleware.Prometheus (prometheus)
+--import Prometheus (register)
+--import Prometheus.Metric.GHC (ghcMetrics)
 
 -- This line actually creates our YesodDispatch instance. It is the second half
 -- of the call to mkYesodData which occurs in Foundation.hs. Please see the

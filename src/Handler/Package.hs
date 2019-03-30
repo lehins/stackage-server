@@ -1,5 +1,10 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- | Lists the package page similar to Hackage.
 
@@ -11,21 +16,22 @@ module Handler.Package
     , renderNoPackages
     ) where
 
-import           Data.Char
-import           Data.Coerce
+import Control.Lens
+import Data.Char
+import Data.Coerce
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Lazy as LT
-import           Distribution.Package.ModuleForest
-import           Graphics.Badge.Barrier
-import           Control.Lens
-import           Import
+import Distribution.Package.ModuleForest
+import Graphics.Badge.Barrier
+import Import
+import Stackage.Database
+import Stackage.Database.PackageInfo (PackageInfo(..))
+import Stackage.Database.Types (HackageCabalInfo(..), LatestInfo(..),
+                                ModuleListingInfo(..))
 import qualified Text.Blaze.Html.Renderer.Text as LT
-import           Text.Email.Validate
-import           Stackage.Database
-import           Stackage.Database.Types (HackageCabalInfo(..), ModuleListingInfo(..), LatestInfo(..))
-import           Stackage.Database.PackageInfo (PackageInfo(..))
-import           Yesod.GitRepo
+import Text.Email.Validate
+import Yesod.GitRepo
 
 -- | Page metadata package.
 getPackageR :: PackageNameP -> Handler Html
@@ -70,12 +76,12 @@ checkSpam pname inner = do
         $(widgetFile "spam-package")
       else inner
 
-packagePage :: Maybe (SnapshotPackageInfo)
+packagePage :: Maybe SnapshotPackageInfo
             -> PackageNameP
             -> Handler Html
 packagePage mspi pname =
     track "Handler.Package.packagePage" $
-    checkSpam pname $ do
+    checkSpam pname $
         maybe (getSnapshotPackageLatestVersion pname) (return . Just) mspi >>= \case
           Nothing -> notFound -- getHackageLatestVersion pname >>= maybe notFound return
           Just spi -> handleSnapshotPackage spi
@@ -85,13 +91,13 @@ handleSnapshotPackage spi = do
     (isDeprecated, inFavourOf) <- getDeprecated pname
     latests <- getLatests pname
     PackageInfo {..} <- getPackageInfo spi
-    deps <- map (first unPackageRev) <$> getForwardDeps spi (Just maxDisplayedDeps)
-    revDeps <- map (first unPackageRev) <$> getReverseDeps spi (Just maxDisplayedDeps)
+    deps <- map (first dropVersionRev) <$> getForwardDeps spi (Just maxDisplayedDeps)
+    revDeps <- map (first dropVersionRev) <$> getReverseDeps spi (Just maxDisplayedDeps)
     (depsCount, revDepsCount) <- getDepsCount spi
     mhciLatest <-
         case spiOrigin spi of
             Hackage -> getHackageLatestVersion pname
-            _ -> pure Nothing
+            _       -> pure Nothing
     let mdocs = Just (spiSnapName spi, piVersion, piModuleNames)
         mSnapName = Just $ spiSnapName spi
         mdisplayedVersion = Just $ spiVersionRev spi
@@ -102,7 +108,7 @@ handleSnapshotPackage spi = do
                     let wrap f = SnapshotR snap $ f $ PNVNameVersion pname (spiVersion spi)
                      in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
     let mhomepage =
-            case T.strip (piHomepage) of
+            case T.strip piHomepage of
                 x
                     | null x -> Nothing
                     | otherwise -> Just x
@@ -124,7 +130,7 @@ handleSnapshotPackage spi = do
         $(widgetFile "package")
   where
     pname = spiPackageName spi
-    unPackageRev (PackageVersionRev pname' _) = pname'
+    dropVersionRev (PackageVersionRev pname' _) = pname'
     enumerate = zip [0 :: Int ..]
     renderModules sname packageIdentifier = renderForest [] . moduleForest . coerce
       where
@@ -135,7 +141,7 @@ handleSnapshotPackage spi = do
                           ^{renderTree tree}
               |]
           where
-            renderTree (Node {..}) =
+            renderTree Node {..} =
                 [hamlet|
                   <li>
                     $if isModule
@@ -191,9 +197,9 @@ parseIdentitiesLiberally =
   map parseChunk .
   T.split (== ',')
   where emptyPlainText (PlainText e) = T.null e
-        emptyPlainText _ = False
+        emptyPlainText _             = False
         strip (PlainText t) = PlainText (T.strip t)
-        strip x = x
+        strip x             = x
         concatPlains = go
           where go (PlainText x:PlainText y:xs) =
                   go (PlainText (x <> "," <> y) :

@@ -2,19 +2,21 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Handler.Hoogle where
 
-import           Control.DeepSeq (NFData(..))
-import           Data.Data (Data)
+import Control.DeepSeq (NFData(..))
+import Data.Data (Data)
 import qualified Data.Text as T
-import           Data.Text.Read (decimal)
+import Data.Text.Read (decimal)
 import qualified Hoogle
-import           Import
-import           Stackage.Database
-import           Stackage.Database.Types (ModuleListingInfo(..))
-import           Text.Blaze.Html (preEscapedToHtml)
+import Import
+import Stackage.Database
+import Stackage.Database.Types (ModuleListingInfo(..))
+import Text.Blaze.Html (preEscapedToHtml)
 import qualified Text.HTML.DOM
-import           Text.XML.Cursor (fromDocument, ($//), content)
+import Text.XML.Cursor (content, fromDocument, ($//))
 
 getHoogleDB :: SnapName -> Handler (Maybe FilePath)
 getHoogleDB name = track "Handler.Hoogle.getHoogleDB" $ do
@@ -32,11 +34,11 @@ getHoogleR name = track "Handler.Hoogle.getHoogleR" $ do
     let count' =
             case decimal <$> mresults' of
                 Just (Right (i, "")) -> min perPage i
-                _ -> perPage
+                _                    -> perPage
         page =
             case decimal <$> mpage of
                 Just (Right (i, "")) -> i
-                _ -> 1
+                _                    -> 1
         offset = (page - 1) * perPage
     mdatabasePath <- getHoogleDB name
     dbPath <- maybe (hoogleDatabaseNotAvailableFor name) return mdatabasePath
@@ -79,7 +81,7 @@ getHoogleDatabaseR :: SnapName -> Handler Html
 getHoogleDatabaseR name = track "Handler.Hoogle.getHoogleDatabaseR" $ do
     mdatabasePath <- getHoogleDB name
     case mdatabasePath of
-        Nothing -> hoogleDatabaseNotAvailableFor name
+        Nothing   -> hoogleDatabaseNotAvailableFor name
         Just path -> sendFile "application/octet-stream" path
 
 hoogleDatabaseNotAvailableFor :: SnapName -> Handler a
@@ -100,10 +102,10 @@ perPage :: Int
 perPage = 10
 
 data HoogleQueryInput = HoogleQueryInput
-    { hqiQueryInput  :: Text
-    , hqiLimitTo     :: Int
-    , hqiOffsetBy    :: Int
-    , hqiExact       :: Bool
+    { hqiQueryInput :: Text
+    , hqiLimitTo    :: Int
+    , hqiOffsetBy   :: Int
+    , hqiExact      :: Bool
     }
     deriving (Eq, Read, Show, Data, Ord, Generic)
 
@@ -127,7 +129,7 @@ data PackageLink = PackageLink
 
 data ModuleLink = ModuleLink
     { mlName :: ModuleNameP
-    , mlURL :: String
+    , mlURL  :: String
     }
     deriving (Eq, Read, Show, Data, Ord, Generic)
 

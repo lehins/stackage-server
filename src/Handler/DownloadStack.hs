@@ -1,15 +1,16 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE TemplateHaskell #-}
 module Handler.DownloadStack
     ( getDownloadStackListR
     , getDownloadStackR
     , getLatestMatcher
     ) where
 
-import Import
-import Yesod.GitRepo
-import Data.WebsiteContent
 import Data.Aeson.Parser (json)
 import Data.Conduit.Attoparsec (sinkParser)
+import Data.WebsiteContent
+import Import
+import Yesod.GitRepo
 
 getDownloadStackListR :: Handler Html
 getDownloadStackListR = track "Handler.DownloadStack.getDownloadStackListR" $ do

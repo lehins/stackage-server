@@ -1,4 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE QuasiQuotes #-}
 module Handler.PackageDeps
   ( getPackageDepsR
   , getPackageRevDepsR

@@ -39,7 +39,7 @@ steps:
       # - none: Do not perform any alignment.
       #
       # Default: global.
-      align: global
+      align: none
 
       # The following options affect only import list alignment.
       #
@@ -117,7 +117,7 @@ steps:
       #   > import Vector.Instances ()
       #
       # Default: inherit
-      empty_list_align: inherit
+      empty_list_align: right_after
 
       # List padding determines indentation of import list on lines after import.
       # This option affects 'long_list_align'.
@@ -143,7 +143,7 @@ steps:
       #   > import Data.Foldable (Foldable(fold, foldl, foldMap))
       #
       # Default: true
-      separate_lists: true
+      separate_lists: false
 
       # Space surround option affects formatting of import lists on a single
       # line. The only difference is single space after the initial
@@ -183,11 +183,11 @@ steps:
       #   between actual import and closing bracket.
       #
       # Default: true
-      align: true
+      align: false
 
       # stylish-haskell can detect redundancy of some language pragmas. If this
       # is set to true, it will remove those redundant pragmas. Default: true.
-      remove_redundant: true
+      remove_redundant: false
 
   # Replace tabs by spaces. This is disabled by default.
   # - tabs:

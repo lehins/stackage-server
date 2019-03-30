@@ -1,14 +1,14 @@
-{-# LANGUAGE FlexibleContexts           #-}
-{-# LANGUAGE FlexibleInstances          #-}
-{-# LANGUAGE FunctionalDependencies     #-}
-{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE MultiParamTypeClasses      #-}
-{-# LANGUAGE NoImplicitPrelude          #-}
-{-# LANGUAGE QuasiQuotes                #-}
-{-# LANGUAGE RecordWildCards            #-}
-{-# LANGUAGE TemplateHaskell            #-}
-{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
 module Stackage.Database.Schema
     ( -- * Database
       run
@@ -40,26 +40,23 @@ module Stackage.Database.Schema
     , module PS
     ) where
 
-import           Control.Monad.Logger        (runNoLoggingT)
-import           Control.Monad.Logger        (runStdoutLoggingT)
-import qualified Data.Aeson                  as A
-import           Data.Pool                   (destroyAllResources)
-import           Database.Persist
-import           Database.Persist.Postgresql
-import           Database.Persist.TH
-import           Pantry.Storage              as PS (BlobId, HackageCabalId,
-                                                    PackageNameId, Tree (..),
-                                                    TreeEntry (..), TreeEntryId,
-                                                    TreeId, Unique (..),
-                                                    VersionId, unBlobKey)
-import qualified Pantry.Storage              as Pantry (migrateAll)
-import           Pantry.Types                (HasPantryConfig (..),
-                                              PantryConfig (..), Storage (..), Revision)
-import           RIO
-import           RIO.Time
-import           Types                       (CompilerP (..), FlagNameP,
-                                              ModuleNameP, PackageOrigin,
-                                              SnapName, VersionRangeP)
+import Control.Monad.Logger (runNoLoggingT)
+--import Control.Monad.Logger (runStdoutLoggingT)
+import qualified Data.Aeson as A
+import Data.Pool (destroyAllResources)
+import Database.Persist
+import Database.Persist.Postgresql
+import Database.Persist.TH
+import Pantry.Storage as PS (BlobId, HackageCabalId, PackageNameId, Tree(..),
+                             TreeEntry(..), TreeEntryId, TreeId, Unique(..),
+                             VersionId, unBlobKey)
+import qualified Pantry.Storage as Pantry (migrateAll)
+import Pantry.Types (HasPantryConfig(..), PantryConfig(..), Revision,
+                     Storage(..))
+import RIO
+import RIO.Time
+import Types (CompilerP(..), FlagNameP, ModuleNameP, PackageOrigin, SnapName,
+              VersionRangeP)
 
 currentSchema :: Int
 currentSchema = 1

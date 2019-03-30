@@ -1,76 +1,69 @@
-{-# LANGUAGE CPP                 #-}
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE NamedFieldPuns      #-}
-{-# LANGUAGE NoImplicitPrelude   #-}
-{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE TupleSections #-}
 module Stackage.Database.Cron
     ( stackageServerCron
     , newHoogleLocker
     , singleRun
     ) where
 
-import qualified Codec.Archive.Tar               as Tar
-import           Conduit
-import           Control.Lens                    ((.~))
-import qualified Control.Monad.Trans.AWS         as AWS (paginate)
-import           Control.SingleRun
-import qualified Data.ByteString.Char8           as BS8
-import qualified Data.ByteString.Lazy            as LBS
-import qualified Data.ByteString.Lazy.Char8      as LBS8
-import qualified Data.Conduit.Binary             as CB
-import           Data.Conduit.Zlib               (WindowBits (WindowBits),
-                                                  compress, ungzip)
-import qualified Data.IntMap.Strict              as IntMap
-import           Data.Streaming.Network          (bindPortTCP)
-import           Database.Persist
-import           Database.Persist.Postgresql
-import           Distribution.PackageDescription (GenericPackageDescription)
+import qualified Codec.Archive.Tar as Tar
+import Conduit
+import Control.Lens ((.~))
+import qualified Control.Monad.Trans.AWS as AWS (paginate)
+import Control.SingleRun
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBS8
+import qualified Data.Conduit.Binary as CB
+import Data.Conduit.Zlib (WindowBits(WindowBits), compress, ungzip)
+import qualified Data.IntMap.Strict as IntMap
+import Data.Streaming.Network (bindPortTCP)
+import Database.Persist
+import Database.Persist.Postgresql
+import Distribution.PackageDescription (GenericPackageDescription)
 import qualified Hoogle
-import           Network.AWS                     hiding (Request, Response)
-import           Network.AWS.Data.Body           (toBody)
-import           Network.AWS.Data.Log            (build)
-import           Network.AWS.Data.Text           (toText)
-import           Network.AWS.Pager
-import           Network.AWS.S3
-import           Network.HTTP.Client
-import           Network.HTTP.Client.Conduit     (bodyReaderSource)
-import           Network.HTTP.Simple             (getResponseBody,
-                                                  httpJSONEither, parseRequest)
-import           Network.HTTP.Types              (status200)
-import           Pantry                          (defaultHackageSecurityConfig)
-import           Pantry.Hackage                  (DidUpdateOccur (..),
-                                                  forceUpdateHackageIndex,
-                                                  getHackageTarballOnGPD)
-import           Pantry.Storage                  (HackageCabalId, TreeId,
-                                                  getTreeForKey, loadBlobById,
-                                                  treeCabal)
-import           Pantry.Types                    (HpackExecutable (HpackBundled),
-                                                  PantryConfig (..))
-import           Path                            (parseAbsDir, toFilePath)
-import           RIO
-import           RIO.Directory
-import           RIO.FilePath
-import qualified RIO.Map                         as Map
-import           RIO.Process                     (mkDefaultProcessContext)
-import qualified RIO.Set                         as Set
-import qualified RIO.Text                        as T
-import           RIO.Time
-import           Stackage.Database.Github
-import           Stackage.Database.PackageInfo
-import           Stackage.Database.Query
-import           Stackage.Database.Schema
-import           Stackage.Database.Types
-import           System.Environment              (getEnv)
-import           UnliftIO.Concurrent             (getNumCapabilities)
-import           Web.PathPieces                  (fromPathPiece, toPathPiece)
+import Network.AWS hiding (Request, Response)
+import Network.AWS.Data.Body (toBody)
+import Network.AWS.Data.Log (build)
+import Network.AWS.Data.Text (toText)
+import Network.AWS.Pager
+import Network.AWS.S3
+import Network.HTTP.Client
+import Network.HTTP.Client.Conduit (bodyReaderSource)
+import Network.HTTP.Simple (getResponseBody, httpJSONEither, parseRequest)
+import Network.HTTP.Types (status200)
+import Pantry (defaultHackageSecurityConfig)
+import Pantry.Hackage (DidUpdateOccur(..), forceUpdateHackageIndex,
+                       getHackageTarballOnGPD)
+import Pantry.Storage (HackageCabalId, TreeId, getTreeForKey, loadBlobById,
+                       treeCabal)
+import Pantry.Types (HpackExecutable(HpackBundled), PantryConfig(..))
+import Path (parseAbsDir, toFilePath)
+import RIO
+import RIO.Directory
+import RIO.FilePath
+import qualified RIO.Map as Map
+import RIO.Process (mkDefaultProcessContext)
+import qualified RIO.Set as Set
+import qualified RIO.Text as T
+import RIO.Time
+import Stackage.Database.Github
+import Stackage.Database.PackageInfo
+import Stackage.Database.Query
+import Stackage.Database.Schema
+import Stackage.Database.Types
+import System.Environment (getEnv)
+import UnliftIO.Concurrent (getNumCapabilities)
+import Web.PathPieces (fromPathPiece, toPathPiece)
 
-import           Data.Yaml                       (decodeFileEither)
-import           Pantry.Types                    (CabalFileInfo (..),
-                                                  HasPantryConfig (..),
-                                                  PackageIdentifierRevision (..),
-                                                  packageTreeKey)
+import Data.Yaml (decodeFileEither)
+import Pantry.Types (CabalFileInfo(..), HasPantryConfig(..),
+                     PackageIdentifierRevision(..), packageTreeKey)
 
 
 
@@ -468,6 +461,7 @@ createOrUpdateSnapshot ::
     -> ResourceT (RIO StackageCron) (ResourceT (RIO StackageCron) ())
 createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo@(_, updatedOn, _) =
     snd <$> concurrently prevAction (lift loadCurrentSnapshot)
+    --todo: logSticky "Still loading the docs for previous snapshot ..."
   where
     loadCurrentSnapshot =
         decideOnSnapshotUpdate snapInfo >>= \case
@@ -475,7 +469,11 @@ createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo@(_, updatedOn,
             Just (snapshotId, snapshotFile) ->
                 updateSnapshot corePackageInfoGetters snapshotId updatedOn snapshotFile
 
-
+-- | Updates all packages in the snapshot. If any missing they will be created. Returns an action
+-- that will check for available documentation for modules that are known to exist and mark as
+-- documented when haddock is present on AWS S3. Only after documentation has been checked this
+-- snapshot will be marked as completely updated. This is required in case something goes wrong and
+-- process is interrupted
 updateSnapshot ::
        Map CompilerP [CorePackageGetter]
     -> SnapshotId
@@ -505,7 +503,6 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
         race
             (runProgressReporter loadedPackageCountRef totalPackages sfName)
             (pooledMapConcurrentlyN connCount addPantryPackageWithReport sfPackages)
-    logSticky "Still loading the docs for previous snapshot ..."
     let pantryUpdateSucceeded = either (const False) and ePantryUpdatesSucceeded
     return $ do
         checkForDocsSucceeded <-

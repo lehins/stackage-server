@@ -1,19 +1,21 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Data.GhcLinks
   ( GhcLinks(..)
   , readGhcLinks
   ) where
 
-import           Control.Monad.State.Strict (modify, execStateT)
+import Control.Monad.State.Strict (execStateT, modify)
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Yaml as Yaml
-import           RIO
-import           RIO.FilePath
-import           RIO.Text (unpack)
-import           System.Directory
-import           Web.PathPieces
+import RIO
+import RIO.FilePath
+import RIO.Text (unpack)
+import System.Directory
+import Web.PathPieces
 
-import           Types
+import Types
 
 
 newtype GhcLinks = GhcLinks

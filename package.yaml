@@ -97,14 +97,6 @@ dependencies:
 
 default-extensions:
 - OverloadedStrings
-- ViewPatterns
-- TemplateHaskell
-- RecordWildCards
-- LambdaCase
-- ScopedTypeVariables
-- FlexibleContexts
-- FlexibleInstances
-- QuasiQuotes
 
 library:
   source-dirs: src

@@ -1,7 +1,6 @@
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE NamedFieldPuns    #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE RecordWildCards #-}
 module Stackage.Database.Types
     ( SnapName(..)
     , isLts
@@ -42,23 +41,20 @@ module Stackage.Database.Types
     , Readme(..)
     ) where
 
-import           Data.Aeson
-import qualified Data.Text                as T
-import           Data.Text.Read           (decimal)
-import           Network.AWS              (Env, HasEnv (..))
-import           Pantry.SHA256            (fromHexText)
-import           Pantry.Storage           (BlobId, HackageCabalId)
-import           Pantry.Types             (BlobKey (..), CabalFileInfo (..),
-                                           FileSize (..), HasPantryConfig (..),
-                                           PackageIdentifierRevision (..),
-                                           PackageNameP (..), PantryConfig,
-                                           TreeKey (..), VersionP (..))
-import           RIO
-import           RIO.Process              (HasProcessContext (..),
-                                           ProcessContext)
-import           RIO.Time                 (Day)
-import           Stackage.Database.Schema
-import           Types
+import Data.Aeson
+import qualified Data.Text as T
+import Data.Text.Read (decimal)
+import Network.AWS (Env, HasEnv(..))
+import Pantry.SHA256 (fromHexText)
+import Pantry.Storage (BlobId, HackageCabalId)
+import Pantry.Types (BlobKey(..), CabalFileInfo(..), FileSize(..),
+                     HasPantryConfig(..), PackageIdentifierRevision(..),
+                     PackageNameP(..), PantryConfig, TreeKey(..), VersionP(..))
+import RIO
+import RIO.Process (HasProcessContext(..), ProcessContext)
+import RIO.Time (Day)
+import Stackage.Database.Schema
+import Types
 
 haddockBucketName :: Text
 haddockBucketName = "haddock.stackage.org"
