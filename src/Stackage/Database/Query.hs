@@ -291,9 +291,30 @@ getSnapshotPackageModules snapshotPackageId hasDocs =
              pure (m ^. ModuleName))
 
 
--- FIXME: list latest version with latest snapshot it is in
-getAllPackages :: GetStackageDatabase env m => m [(PackageNameP, VersionP, Text)]
-getAllPackages = undefined
+getAllPackages :: GetStackageDatabase env m => m [(SnapName, PackageListingInfo)]
+getAllPackages =
+    run (map toPackageListingInfo <$>
+         select
+             (from $ \(sp `InnerJoin` snap `InnerJoin` pn `InnerJoin` v) ->
+                  distinctOn [don (pn ^. PackageNameName)] $ do
+                      on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
+                      on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+                      on (sp ^. SnapshotPackageSnapshot ==. snap ^. SnapshotId)
+                      orderBy
+                          [ asc (pn ^. PackageNameName)
+                          , desc (versionArray v)
+                          , desc (sp ^. SnapshotPackageRevision)
+                          , desc (snap ^. SnapshotCreated)
+                          ]
+                      pure
+                          ( snap ^. SnapshotName
+                          , pn ^. PackageNameName
+                          , v ^. VersionVersion
+                          , sp ^. SnapshotPackageSynopsis
+                          , sp ^. SnapshotPackageOrigin)))
+  where
+    toPackageListingInfo (Value snapName, Value pliName, Value pliVersion, Value pliSynopsis, Value pliOrigin) =
+        (snapName, PackageListingInfo {pliName, pliVersion, pliSynopsis, pliOrigin})
 
 getPackagesForSnapshot :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
 getPackagesForSnapshot snapshotId =

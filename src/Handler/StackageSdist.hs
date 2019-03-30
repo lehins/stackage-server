@@ -25,13 +25,13 @@ handlePNVTarball name version =
 getStackageSdistR
   :: SnapName -> PackageNameVersion -> HandlerFor App TypedContent
 getStackageSdistR sname pnv =
-    track "Handler.StackageSdist.getStackageSdistR" $ do
-        pnvToSnapshotPackageInfo sname pnv handlePNVTarball $ \isSameVersion spi ->
-            if isSameVersion
-                then packagePage (Just spi) (spiPackageName spi) >>= sendResponse
-                else redirect $
-                     SnapshotR sname $
-                     StackageSdistR $ PNVNameVersion (spiPackageName spi) (spiVersion spi)
+    track "Handler.StackageSdist.getStackageSdistR" $
+    pnvToSnapshotPackageInfo sname pnv handlePNVTarball $ \isSameVersion spi ->
+        if isSameVersion
+            then packagePage (Just spi) (spiPackageName spi) >>= sendResponse
+            else redirect $
+                 SnapshotR sname $
+                 StackageSdistR $ PNVNameVersion (spiPackageName spi) (spiVersion spi)
 
 
 pnvToSnapshotPackageInfo ::
