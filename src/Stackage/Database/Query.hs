@@ -491,6 +491,10 @@ getSnapshotsForPackage pname mlimit =
 
 getPackageInfo ::
        GetStackageDatabase env m => Either HackageCabalInfo SnapshotPackageInfo -> m PackageInfo
+getPackageInfo (Left hci) =
+    run $ do
+        cabalBlob <- loadBlobById (hciCabalBlobId hci)
+        pure $ toPackageInfo (parseCabalBlob cabalBlob) Nothing Nothing
 getPackageInfo (Right spi) =
     run $
     case spiCabalBlobId spi of
@@ -503,8 +507,7 @@ getPackageInfo (Right spi) =
                     gpd
                     (toContentFile Readme <$> mreadme)
                     (toContentFile Changelog <$> mchangelog)
-        Nothing -> error "FIXME: we ought to return Nothing"
-               -- FIXME: handle a case when cabal file isn't available
+        Nothing -> error "FIXME: handle a case when cabal file isn't available but package.yaml is"
   where
     toContentFile :: (ByteString -> Bool -> a) -> (SafeFilePath, ByteString) -> a
     toContentFile con (path, bs) = con bs (isMarkdownFilePath path)

@@ -123,7 +123,7 @@ parseCabalBlob :: ByteString -> GenericPackageDescription
 parseCabalBlob cabalBlob =
     case snd $ runParseResult $ parseGenericPackageDescription cabalBlob of
         Left err  -> error $ "Problem parsing cabal blob: " <> show err
-        Right pgd -> pgd
+        Right gpd -> gpd
 
 
 parseCabalBlobMaybe ::
