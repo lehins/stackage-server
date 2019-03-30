@@ -31,6 +31,7 @@ module Stackage.Database.Query
     , getHackageLatestVersion
     , getSnapshotPackageInfo
     , getSnapshotPackageLatestVersion
+    , getSnapshotPackagePageInfo
     , getPackageInfo
     , getSnapshotsForPackage
     -- ** Dependencies
@@ -300,14 +301,14 @@ getPackageVersionForSnapshot
   => SnapshotId -> PackageNameP -> m (Maybe VersionP)
 getPackageVersionForSnapshot snapshotId pname = undefined
 
-getLatests :: GetStackageDatabase env m => PackageNameP -> m [LatestInfo]
+getLatests :: MonadIO m => PackageNameP -> ReaderT SqlBackend m [LatestInfo]
 getLatests pname = pure [] -- undefined
 
 -- | Looks up in pantry the latest information about the package on Hackage.
 getHackageLatestVersion ::
-       GetStackageDatabase env m => PackageNameP -> m (Maybe HackageCabalInfo)
+       MonadIO m => PackageNameP -> ReaderT SqlBackend m (Maybe HackageCabalInfo)
 getHackageLatestVersion pname =
-    run $ selectApplyMaybe toHackageCabalInfo
+    selectApplyMaybe toHackageCabalInfo
         (from $ \(hc `InnerJoin` pn `InnerJoin` v) -> do
              on (hc ^. HackageCabalVersion ==. v ^. VersionId)
              on (hc ^. HackageCabalName ==. pn ^. PackageNameId)
@@ -324,7 +325,7 @@ getHackageLatestVersion pname =
         HackageCabalInfo
             { hciCabalId = unValue cid
             , hciCabalBlobId = unValue cbid
-            , hciPackageIdentifier = pname
+            , hciPackageName = pname
             , hciVersionRev = toVersionRev (unValue v) (unValue rev)
             }
 
@@ -336,6 +337,51 @@ getSnapshotPackageInfo snapName pname =
     run (snapshotPackageInfoQuery $ \_sp s pn _v spiQ -> do
              where_ ((s ^. SnapshotName ==. val snapName) &&. (pn ^. PackageNameName ==. val pname))
              pure ((), spiQ))
+
+
+getSnapshotPackagePageInfo ::
+       GetStackageDatabase env m => SnapshotPackageInfo -> Int -> m SnapshotPackagePageInfo
+getSnapshotPackagePageInfo spi maxDisplayedDeps =
+    run $ do
+        mhciLatest <-
+            case spiOrigin spi of
+                Hackage -> getHackageLatestVersion $ spiPackageName spi
+                _ -> pure Nothing
+        forwardDepsCount <- getForwardDepsCount spi
+        reverseDepsCount <- getReverseDepsCount spi
+        forwardDeps <-
+            if forwardDepsCount > 0
+                then getForwardDeps spi (Just maxDisplayedDeps)
+                else pure []
+        reverseDeps <-
+            if reverseDepsCount > 0
+                then getReverseDeps spi (Just maxDisplayedDeps)
+                else pure []
+        latestInfo <- getLatests (spiPackageName spi)
+        moduleNames <- getModuleNames (spiSnapshotPackageId spi)
+        pure
+            SnapshotPackagePageInfo
+                { sppiSnapshotPackageInfo = spi
+                , sppiLatestHackageCabalInfo = mhciLatest
+                , sppiForwardDeps = map (first dropVersionRev) forwardDeps
+                , sppiForwardDepsCount = forwardDepsCount
+                , sppiReverseDeps = map (first dropVersionRev) reverseDeps
+                , sppiReverseDepsCount = reverseDepsCount
+                , sppiLatestInfo = latestInfo
+                , sppiModuleNames = moduleNames
+                , sppiVersion =
+                      listToMaybe
+                          [ spiVersionRev spi
+                          | VersionRev ver mrev <-
+                                maybe [] (pure . hciVersionRev) mhciLatest ++
+                                map liVersionRev latestInfo
+                          , ver > curVer ||
+                                (ver == curVer &&
+                                 fromMaybe (Revision 0) mrev > fromMaybe (Revision 0) mcurRev)
+                          ]
+                }
+  where
+    VersionRev curVer mcurRev = spiVersionRev spi
 
 type SqlExprSPI
      = ( SqlExpr (Value SnapshotPackageId)
@@ -443,21 +489,20 @@ getSnapshotsForPackage pname mlimit =
 
 
 
-getPackageInfo :: GetStackageDatabase env m => SnapshotPackageInfo -> m PackageInfo
-getPackageInfo spi =
+getPackageInfo ::
+       GetStackageDatabase env m => Either HackageCabalInfo SnapshotPackageInfo -> m PackageInfo
+getPackageInfo (Right spi) =
     run $
     case spiCabalBlobId spi of
         Just cabalBlobId -> do
             gpd <- parseCabalBlob <$> loadBlobById cabalBlobId
             mreadme <- maybe (pure Nothing) getFileByTreeEntryId (spiReadme spi)
             mchangelog <- maybe (pure Nothing) getFileByTreeEntryId (spiChangelog spi)
-            moduleNames <- getModuleNames (spiSnapshotPackageId spi)
             pure $
                 toPackageInfo
                     gpd
                     (toContentFile Readme <$> mreadme)
                     (toContentFile Changelog <$> mchangelog)
-                    moduleNames
         Nothing -> error "FIXME: we ought to return Nothing"
                -- FIXME: handle a case when cabal file isn't available
   where
@@ -489,14 +534,14 @@ getModuleNames spid =
 ------ Dependencies
 
 getForwardDeps ::
-       GetStackageDatabase env m
+       MonadIO m
     => SnapshotPackageInfo
     -> Maybe Int
-    -> m [(PackageVersionRev, VersionRangeP)]
+    -> ReaderT SqlBackend m [(PackageVersionRev, VersionRangeP)]
 getForwardDeps spi mlimit =
     fmap toDepRange <$>
-    run (select $
-         from $ \(user `InnerJoin` uses `InnerJoin` pn `InnerJoin` v) -> do
+    select
+        (from $ \(user `InnerJoin` uses `InnerJoin` pn `InnerJoin` v) -> do
              on (uses ^. SnapshotPackageVersion ==. v ^. VersionId)
              on (uses ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
              on (user ^. DepUses ==. uses ^. SnapshotPackagePackageName)
@@ -537,14 +582,14 @@ getDepsCount spi =
     getReverseDepsCount spi
 
 getReverseDeps ::
-       GetStackageDatabase env m
+       MonadIO m
     => SnapshotPackageInfo
     -> Maybe Int -- ^ Optionally limit number of dependencies
-    -> m [(PackageVersionRev, VersionRangeP)]
+    -> ReaderT SqlBackend m [(PackageVersionRev, VersionRangeP)]
 getReverseDeps spi mlimit =
     fmap toDepRange <$>
-    run (select $
-         from $ \(sp `InnerJoin` dep `InnerJoin` pn `InnerJoin` v `InnerJoin` curPn) -> do
+    select
+        (from $ \(sp `InnerJoin` dep `InnerJoin` pn `InnerJoin` v `InnerJoin` curPn) -> do
              on (dep ^. DepUses ==. curPn ^. PackageNameId)
              on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
              on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)

@@ -59,9 +59,11 @@ helper depType spi =
                 case depType of
                     Deps -> (getForwardDeps, "Dependencies for ")
                     RevDeps -> (getReverseDeps, "Reverse dependencies on ")
-        deps <- depsGetter spi Nothing
+        deps <- run $ depsGetter spi Nothing
         render <- getUrlRender
-        let title = toHtml $ header ++ toPathPiece (spiPackageName spi)
+        let title =
+                toHtml $
+                header ++ toPathPiece (PackageIdentifierP (spiPackageName spi) (spiVersion spi))
             packagePageUrl =
                 render $
                 SnapshotR (spiSnapName spi) $

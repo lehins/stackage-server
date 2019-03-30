@@ -1,6 +1,9 @@
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 module Stackage.Database.PackageInfo
     ( PackageInfo(..)
+    , Identifier(..)
+    , renderEmail
     , toPackageInfo
     , parseCabalBlob
     , parseCabalBlobMaybe
@@ -12,19 +15,20 @@ module Stackage.Database.PackageInfo
 
 import CMarkGFM
 import Data.Coerce
+import Data.Char (isSpace)
 import Data.Map.Merge.Strict as Map
 import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
 import Distribution.Compiler (CompilerFlavor(GHC))
-import Distribution.Package (Dependency(..), PackageIdentifier(..))
+import Distribution.Package (Dependency(..))
 import Distribution.PackageDescription (CondTree(..), Condition(..),
                                         ConfVar(..),
                                         Flag(flagDefault, flagName), FlagName,
                                         GenericPackageDescription, author,
                                         condExecutables, condLibrary,
                                         description, genPackageFlags, homepage,
-                                        license, maintainer, package,
+                                        license, maintainer,
                                         packageDescription, synopsis)
 import Distribution.PackageDescription.Parsec (parseGenericPackageDescription,
                                                runParseResult)
@@ -36,6 +40,7 @@ import Distribution.Types.VersionRange (VersionRange, intersectVersionRanges,
                                         normaliseVersionRange, withinRange)
 import Distribution.Version (simplifyVersionRange)
 import Pantry.Types (unSafeFilePath)
+import qualified Data.Text.Encoding as T
 import RIO
 import qualified RIO.Map as Map
 import qualified RIO.Map.Unchecked as Map (mapKeysMonotonic)
@@ -45,19 +50,18 @@ import Text.Blaze.Html (Html, preEscapedToHtml, toHtml)
 import Types (CompilerP(..), FlagNameP(..), ModuleNameP(..), PackageNameP(..),
               SafeFilePath, VersionP(..), VersionRangeP(..))
 import Yesod.Form.Fields (Textarea(..))
+import Text.Email.Validate
+
 
 data PackageInfo = PackageInfo
-    { piName        :: !PackageNameP
-    , piVersion     :: !VersionP
-    , piSynopsis    :: !Text
+    { piSynopsis    :: !Text
     , piDescription :: !Html
-    , piAuthor      :: !Text
-    , piMaintainer  :: !Text
-    , piHomepage    :: !Text
+    , piAuthors     :: ![Identifier]
+    , piMaintainers :: ![Identifier]
+    , piHomepage    :: !(Maybe Text)
     , piLicenseName :: !Text
     , piReadme      :: !Html
     , piChangelog   :: !Html
-    , piModuleNames :: ![ModuleNameP]
     }
 
 
@@ -65,31 +69,28 @@ toPackageInfo ::
        GenericPackageDescription
     -> Maybe Readme
     -> Maybe Changelog
-    -> [ModuleNameP]
     -> PackageInfo
-toPackageInfo gpd mreadme mchangelog moduleNames =
+toPackageInfo gpd mreadme mchangelog =
     PackageInfo
-        { piName = PackageNameP $ pkgName $ package pd
-        , piVersion = VersionP $ pkgVersion $ package pd
-        , piSynopsis = T.pack $ synopsis pd
+        { piSynopsis = T.pack $ synopsis pd
         , piDescription = renderHaddock (description pd)
-        , piReadme =
-              maybe mempty (\(Readme bs isMarkdown) -> renderContent bs isMarkdown) mreadme
+        , piReadme = maybe mempty (\(Readme bs isMarkdown) -> renderContent bs isMarkdown) mreadme
         , piChangelog =
               maybe mempty (\(Changelog bs isMarkdown) -> renderContent bs isMarkdown) mchangelog
-        , piAuthor = T.pack $ author pd
-        , piMaintainer = T.pack $ maintainer pd
-        , piHomepage = T.pack $ homepage pd
+        , piAuthors = parseIdentitiesLiberally $ T.pack $ author pd
+        , piMaintainers = parseIdentitiesLiberally $ T.pack $ maintainer pd
+        , piHomepage =
+              case T.strip $ T.pack $ homepage pd of
+                  "" -> Nothing
+                  x -> Just x
         , piLicenseName = T.pack $ prettyShow $ license pd
-        , piModuleNames = moduleNames
         }
   where
     pd = packageDescription gpd
     renderContent bs isMarkdown =
         let txt = decodeUtf8With lenientDecode bs
          in if isMarkdown
-                then preEscapedToHtml $
-                     commonmarkToHtml [optSmart] [extTable, extAutolink] txt
+                then preEscapedToHtml $ commonmarkToHtml [optSmart] [extTable, extAutolink] txt
                 else toHtml $ Textarea txt
 
 getSynopsis :: GenericPackageDescription -> Text
@@ -183,3 +184,96 @@ combineDeps :: [Map PackageNameP VersionRange] -> Map PackageNameP VersionRange
 combineDeps =
     Map.unionsWith
         (\x -> normaliseVersionRange . simplifyVersionRange . intersectVersionRanges x)
+
+
+
+-- | An identifier specified in a package. Because this field has
+-- quite liberal requirements, we often encounter various forms. A
+-- name, a name and email, just an email, or maybe nothing at all.
+data Identifier
+  = EmailOnly !EmailAddress -- ^ An email only e.g. jones@example.com
+  | Contact !Text
+            !EmailAddress -- ^ A contact syntax, e.g. Dave Jones <jones@example.com>
+  | PlainText !Text -- ^ Couldn't parse anything sensible, leaving as-is.
+  deriving (Show,Eq)
+
+-- | An author/maintainer field may contain a comma-separated list of
+-- identifiers. It may be the case that a person's name is written as
+-- "Einstein, Albert", but we only parse commas when there's an
+-- accompanying email, so that would be:
+--
+--  Einstein, Albert <emc2@gmail.com>, Isaac Newton <falling@apple.com>
+--
+-- Whereas
+--
+-- Einstein, Albert, Isaac Newton
+--
+-- Will just be left alone. It's an imprecise parsing because the
+-- input is wide open, but it's better than nothing:
+--
+-- λ> parseIdentitiesLiberally "Chris Done, Dave Jones <chrisdone@gmail.com>, Einstein, Albert, Isaac Newton, Michael Snoyman <michael@snoyman.com>"
+-- [PlainText "Chris Done"
+-- ,Contact "Dave Jones" "chrisdone@gmail.com"
+-- ,PlainText "Einstein, Albert, Isaac Newton"
+-- ,Contact "Michael Snoyman" "michael@snoyman.com"]
+--
+-- I think that is quite a predictable and reasonable result.
+--
+parseIdentitiesLiberally :: Text -> [Identifier]
+parseIdentitiesLiberally =
+    filter (not . emptyPlainText) .
+    map strip .
+    concatPlains .
+    map parseChunk .
+    T.split (== ',')
+    where emptyPlainText (PlainText e) = T.null e
+          emptyPlainText _             = False
+          strip (PlainText t) = PlainText (T.strip t)
+          strip x             = x
+          concatPlains = go
+            where go (PlainText x:PlainText y:xs) =
+                    go (PlainText (x <> "," <> y) :
+                        xs)
+                  go (x:xs) = x : go xs
+                  go [] = []
+
+-- | Try to parse a chunk into an identifier.
+--
+-- 1. First tries to parse an \"email@domain.com\".
+-- 2. Then tries to parse a \"Foo <email@domain.com>\".
+-- 3. Finally gives up and returns a plain text.
+--
+-- λ> parseChunk "foo@example.com"
+-- EmailOnly "foo@example.com"
+-- λ> parseChunk "Dave Jones <dave@jones.com>"
+-- Contact "Dave Jones" "dave@jones.com"
+-- λ> parseChunk "<x>"
+-- PlainText "<x>"
+-- λ> parseChunk "Hello!"
+-- PlainText "Hello!"
+--
+parseChunk :: Text -> Identifier
+parseChunk chunk =
+    case emailAddress (T.encodeUtf8 (T.strip chunk)) of
+      Just email -> EmailOnly email
+      Nothing ->
+        case T.stripPrefix
+               ">"
+               (T.dropWhile isSpace
+                            (T.reverse chunk)) of
+          Just rest ->
+            case T.span (/= '<') rest of
+              (T.reverse -> emailStr,this) ->
+                case T.stripPrefix "< " this of
+                  Just (T.reverse -> name) ->
+                    case emailAddress (T.encodeUtf8 (T.strip emailStr)) of
+                      Just email ->
+                        Contact (T.strip name) email
+                      _ -> plain
+                  _ -> plain
+          _ -> plain
+    where plain = PlainText chunk
+
+-- | Render email to text.
+renderEmail :: EmailAddress -> Text
+renderEmail = T.decodeUtf8 . toByteString

@@ -18,6 +18,7 @@ module Stackage.Database.Types
     , PantryPackage(..)
     , SnapshotFile(..)
     , SnapshotPackageInfo(..)
+    , SnapshotPackagePageInfo(..)
     , spiVersionRev
     , HackageCabalInfo(..)
     , PackageListingInfo(..)
@@ -32,6 +33,7 @@ module Stackage.Database.Types
     , toVersionRev
     , toVersionMRev
     , PackageVersionRev(..)
+    , dropVersionRev
     , ModuleNameP(..)
     , SafeFilePath
     , PackageOrigin(..)
@@ -192,10 +194,10 @@ instance ToJSON PackageListingInfo where
 
 
 data HackageCabalInfo = HackageCabalInfo
-    { hciCabalId           :: !HackageCabalId
-    , hciCabalBlobId       :: !BlobId
-    , hciPackageIdentifier :: !PackageNameP
-    , hciVersionRev        :: !VersionRev
+    { hciCabalId     :: !HackageCabalId
+    , hciCabalBlobId :: !BlobId
+    , hciPackageName :: !PackageNameP
+    , hciVersionRev  :: !VersionRev
     } deriving (Show, Eq)
 
 data SnapshotPackageInfo = SnapshotPackageInfo
@@ -211,6 +213,24 @@ data SnapshotPackageInfo = SnapshotPackageInfo
     , spiChangelog         :: !(Maybe TreeEntryId)
     } deriving (Show, Eq)
 
+
+data SnapshotPackagePageInfo = SnapshotPackagePageInfo
+    { sppiSnapshotPackageInfo    :: !SnapshotPackageInfo
+    -- ^ Info of the package on this page
+    , sppiLatestHackageCabalInfo :: !(Maybe HackageCabalInfo)
+    -- ^ If the package is available on hackage, show its latest info
+    , sppiForwardDeps            :: ![(PackageNameP, VersionRangeP)]
+    -- ^ All packages in the snapshot that this package depends on
+    , sppiForwardDepsCount       :: !Int
+    , sppiReverseDeps            :: ![(PackageNameP, VersionRangeP)]
+    -- ^ All packages in the snapshot that depend on this package
+    , sppiReverseDepsCount       :: !Int
+    , sppiLatestInfo             :: ![LatestInfo]
+    , sppiModuleNames            :: ![ModuleNameP]
+    , sppiVersion                :: !(Maybe VersionRev)
+    -- ^ Version on this page. Should be present only if different from latest
+    }
+
 toRevMaybe :: Revision -> Maybe Revision
 toRevMaybe rev = guard (rev /= Revision 0) >> Just rev
 
@@ -224,6 +244,10 @@ toVersionMRev v mrev = VersionRev v (maybe Nothing toRevMaybe mrev)
 
 spiVersionRev :: SnapshotPackageInfo -> VersionRev
 spiVersionRev spi = VersionRev (spiVersion spi) (spiRevision spi >>= toRevMaybe)
+
+dropVersionRev :: PackageVersionRev -> PackageNameP
+dropVersionRev (PackageVersionRev pname _) = pname
+
 
 data ModuleListingInfo = ModuleListingInfo
     { mliModuleName        :: !ModuleNameP
