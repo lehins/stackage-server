@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
 module Stackage.Database.Query
@@ -66,6 +67,7 @@ import Data.Bifunctor (bimap)
 import qualified Data.List as L
 import Database.Esqueleto
 import Database.Esqueleto.Internal.Sql
+import Database.Esqueleto.Internal.Language (FromPreprocess)
 import qualified Database.Persist as P
 import Pantry.Storage (EntityField(..), PackageName, Unique(..), Version,
                        getPackageNameById, getPackageNameId, getTreeForKey,
@@ -301,8 +303,42 @@ getPackageVersionForSnapshot
   => SnapshotId -> PackageNameP -> m (Maybe VersionP)
 getPackageVersionForSnapshot snapshotId pname = undefined
 
+getLatest ::
+       (FromPreprocess SqlQuery SqlExpr SqlBackend t, MonadIO m)
+    => PackageNameP
+    -> (t -> SqlExpr (Value SnapshotId))
+    -> (t -> SqlQuery ())
+    -> ReaderT SqlBackend m (Maybe LatestInfo)
+getLatest pname onWhich orderWhich =
+    selectApplyMaybe
+        toLatestInfo
+        (from $ \(which `InnerJoin` snap `InnerJoin` sp `InnerJoin` pn `InnerJoin` v) -> do
+             on (sp ^. SnapshotPackageVersion ==. v ^. VersionId)
+             on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+             on (sp ^. SnapshotPackageSnapshot ==. snap ^. SnapshotId)
+             on (snap ^. SnapshotId ==. onWhich which)
+             where_ (pn ^. PackageNameName ==. val pname)
+             orderWhich which
+             limit 1
+             pure (snap ^. SnapshotName, v ^. VersionVersion, sp ^. SnapshotPackageRevision))
+  where
+    toLatestInfo (snapName, ver, mrev) =
+        LatestInfo (unValue snapName) $ toVersionMRev (unValue ver) (unValue mrev)
+
+
 getLatests :: MonadIO m => PackageNameP -> ReaderT SqlBackend m [LatestInfo]
-getLatests pname = pure [] -- undefined
+getLatests pname = do
+    mLts <-
+        getLatest
+            pname
+            (^. LtsSnap)
+            (\lts -> orderBy [desc (lts ^. LtsMajor), desc (lts ^. LtsMinor)])
+    mNightly <-
+        getLatest
+            pname
+            (^. NightlySnap)
+            (\nightly -> orderBy [desc (nightly ^. NightlyDay)])
+    pure $ catMaybes [mLts, mNightly]
 
 -- | Looks up in pantry the latest information about the package on Hackage.
 getHackageLatestVersion ::
@@ -456,10 +492,6 @@ getSnapshotPackageLatestVersion pname =
              pure ((), spiQ))
 
 
--- | Convert a string representation of a version to an array so it can be used for sorting.
-versionArray :: SqlExpr (Entity Version) -> SqlExpr (Value [Int64])
-versionArray v = stringToArray (v ^. VersionVersion) (val ("." :: String))
-
 -- | A helper function that expects at most one element to be returned by a `select` and applies a
 -- function to the returned result
 selectApplyMaybe ::
@@ -467,6 +499,11 @@ selectApplyMaybe ::
 selectApplyMaybe f = fmap (fmap f . listToMaybe) . select
 
 
+-- | Convert a string representation of a version to an array so it can be used for sorting.
+versionArray :: SqlExpr (Entity Version) -> SqlExpr (Value [Int64])
+versionArray v = stringToArray (v ^. VersionVersion) (val ("." :: String))
+
+-- | Define postgresql native function in Haskell with Esqueleto
 stringToArray ::
        (SqlString s1, SqlString s2)
     => SqlExpr (Value s1)
