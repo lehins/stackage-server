@@ -11,27 +11,23 @@ module Stackage.Database.Cron
     , singleRun
     ) where
 
-import qualified Codec.Archive.Tar as Tar
 import Conduit
 import Control.Lens ((.~))
 import qualified Control.Monad.Trans.AWS as AWS (paginate)
 import Control.SingleRun
 import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString.Lazy as LBS
-import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.Conduit.Binary as CB
 import Data.Conduit.Zlib (WindowBits(WindowBits), compress, ungzip)
 import qualified Data.IntMap.Strict as IntMap
 import Data.Streaming.Network (bindPortTCP)
+import Data.Yaml (decodeFileEither)
 import Database.Persist
 import Database.Persist.Postgresql
 import Distribution.PackageDescription (GenericPackageDescription)
 import qualified Hoogle
 import Network.AWS hiding (Request, Response)
 import Network.AWS.Data.Body (toBody)
-import Network.AWS.Data.Log (build)
 import Network.AWS.Data.Text (toText)
-import Network.AWS.Pager
 import Network.AWS.S3
 import Network.HTTP.Client
 import Network.HTTP.Client.Conduit (bodyReaderSource)
@@ -40,12 +36,15 @@ import Network.HTTP.Types (status200)
 import Pantry (defaultHackageSecurityConfig)
 import Pantry.Hackage (DidUpdateOccur(..), forceUpdateHackageIndex,
                        getHackageTarballOnGPD)
-import Pantry.Storage (HackageCabalId, TreeId, getTreeForKey, loadBlobById,
-                       treeCabal)
-import Pantry.Types (HpackExecutable(HpackBundled), PantryConfig(..))
+import Pantry.Storage (HackageCabalId, getTreeForKey, loadBlobById, treeCabal)
+import Pantry.Types (CabalFileInfo(..), HasPantryConfig(..),
+                     HpackExecutable(HpackBundled),
+                     PackageIdentifierRevision(..), PantryConfig(..),
+                     packageTreeKey)
 import Path (parseAbsDir, toFilePath)
 import RIO
 import RIO.Directory
+import RIO.File
 import RIO.FilePath
 import qualified RIO.Map as Map
 import RIO.Process (mkDefaultProcessContext)
@@ -60,10 +59,6 @@ import Stackage.Database.Types
 import System.Environment (getEnv)
 import UnliftIO.Concurrent (getNumCapabilities)
 import Web.PathPieces (fromPathPiece, toPathPiece)
-
-import Data.Yaml (decodeFileEither)
-import Pantry.Types (CabalFileInfo(..), HasPantryConfig(..),
-                     PackageIdentifierRevision(..), packageTreeKey)
 
 
 
@@ -102,7 +97,7 @@ getStackageSnapshotsDir = do
 
 withResponseUnliftIO :: MonadUnliftIO m =>
                  Request -> Manager -> (Response BodyReader -> m b) -> m b
-withResponseUnliftIO req man f = withRunInIO $ \ run -> withResponse req man (run . f)
+withResponseUnliftIO req man f = withRunInIO $ \ runInIO -> withResponse req man (runInIO . f)
 
 newHoogleLocker ::
        (HasLogFunc env, MonadIO m) => env -> Manager -> m (SingleRun SnapName (Maybe FilePath))
@@ -129,7 +124,6 @@ newHoogleLocker env man = mkSingleRun hoogleLocker
                                 return $ Just fp
                             else return Nothing
 
-
 getHackageDeprecations ::
        (HasLogFunc env, MonadReader env m, MonadIO m) => m [Deprecation]
 getHackageDeprecations = do
@@ -145,9 +139,10 @@ getHackageDeprecations = do
 
 stackageServerCron :: Bool -> IO ()
 stackageServerCron forceUpdate = do
-    -- Hacky approach instead of PID files
-    _ <- liftIO $ catchIO (bindPortTCP 17834 "127.0.0.1") $ \_ ->
-        error "cabal loader process already running, exiting"
+    void $
+        -- Hacky approach instead of PID files
+        catchIO (bindPortTCP 17834 "127.0.0.1") $
+        const $ throwString "Stackage Cron loader process already running, exiting."
     connectionCount <- getNumCapabilities
     storage <- initStorage connectionCount
     lo <- logOptionsHandle stdout True
@@ -160,25 +155,29 @@ stackageServerCron forceUpdate = do
     gpdCache <- newIORef IntMap.empty
     defaultProcessContext <- mkDefaultProcessContext
     aws <- newEnv Discover
-    withLogFunc (setLogMinLevel LevelInfo lo) $ \ logFunc ->
-      let pantryConfig = PantryConfig { pcHackageSecurity = defaultHackageSecurityConfig
-                                      , pcHpackExecutable = HpackBundled
-                                      , pcRootDir = pantryRootDir
-                                      , pcStorage = storage
-                                      , pcUpdateRef = updateRef
-                                      , pcParsedCabalFilesImmutable = cabalImmutable
-                                      , pcParsedCabalFilesMutable = cabalMutable
-                                      , pcConnectionCount = connectionCount
-                                      }
-          stackage = StackageCron { scPantryConfig = pantryConfig
-                                  , scStackageRoot = stackageRootDir
-                                  , scProcessContext = defaultProcessContext
-                                  , scLogFunc = logFunc
-                                  , scForceFullUpdate = forceUpdate
-                                  , scCachedGPD = gpdCache
-                                  , scEnvAWS = aws
-                                  }
-      in runRIO stackage runStackageUpdate
+    withLogFunc (setLogMinLevel LevelInfo lo) $ \logFunc ->
+        let pantryConfig =
+                PantryConfig
+                    { pcHackageSecurity = defaultHackageSecurityConfig
+                    , pcHpackExecutable = HpackBundled
+                    , pcRootDir = pantryRootDir
+                    , pcStorage = storage
+                    , pcUpdateRef = updateRef
+                    , pcParsedCabalFilesImmutable = cabalImmutable
+                    , pcParsedCabalFilesMutable = cabalMutable
+                    , pcConnectionCount = connectionCount
+                    }
+            stackage =
+                StackageCron
+                    { scPantryConfig = pantryConfig
+                    , scStackageRoot = stackageRootDir
+                    , scProcessContext = defaultProcessContext
+                    , scLogFunc = logFunc
+                    , scForceFullUpdate = forceUpdate
+                    , scCachedGPD = gpdCache
+                    , scEnvAWS = aws
+                    }
+         in runRIO stackage runStackageUpdate
 
 
 runStackageUpdate :: RIO StackageCron ()
@@ -197,6 +196,9 @@ runStackageUpdate = do
         join $
         runConduit $ sourceSnapshots .| foldMC (createOrUpdateSnapshot corePackageGetters) (pure ())
     run $ mapM_ (`rawExecute` []) ["COMMIT", "VACUUM", "BEGIN"]
+
+    -- uploadSnapshotsJSON
+    -- buildAndUploadHoogleDB
 
 
 -- | This will look at 'global-hints.yaml' and will create core package getters that are reused
@@ -327,7 +329,8 @@ checkForDocs snapshotId snapName = do
     sidsCacheRef <- newIORef Map.empty
     -- Cache is for SnapshotPackageId, there will be many modules per peckage, no need to look into
     -- the database for each one of them.
-    notFoundList <- lift $ pooledMapConcurrently (markModules sidsCacheRef) mods
+    n <- max 1 . (`div` 2) . pcConnectionCount <$> view pantryConfigL
+    notFoundList <- lift $ pooledMapConcurrentlyN n (markModules sidsCacheRef) mods
     forM_ (Set.fromList $ catMaybes notFoundList) $ \pid ->
         lift $
         logError $
@@ -517,6 +520,7 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
                 logInfo $ "Created or updated snapshot '" <> display sfName <> "' successfully"
             else logError $ "There were errors while adding snapshot '" <> display sfName <> "'"
 
+
 -- | Report how many packages has been loaded so far and provide statistics at the end.
 runProgressReporter :: IORef Int -> Int -> SnapName -> RIO StackageCron Void
 runProgressReporter loadedPackageCountRef totalPackages snapName = do
@@ -555,129 +559,114 @@ runProgressReporter loadedPackageCountRef totalPackages snapName = do
                 ]
         threadDelay 1000000
 
+uploadSnapshotsJSON :: RIO StackageCron ()
+uploadSnapshotsJSON = do
+    snapshots <- snapshotsJSON
+    let key = ObjectKey "snapshots.json"
+    uploadFromRIO key $
+        set poACL (Just OPublicRead) $
+        set poContentType (Just "application/json") $
+        putObject (BucketName haddockBucketName) key (toBody snapshots)
+
+-- | Writes a gzipped version of hoogle db into temporary file onto the file system and then uploads
+-- it to S3. Temporary file is removed upon completion
+uploadHoogleDB :: FilePath -> ObjectKey -> RIO StackageCron ()
+uploadHoogleDB fp key =
+    withTempFile (takeDirectory fp) (takeFileName fp <.> "gz") $ \fpgz h -> do
+        runConduitRes $ sourceFile fp .| compress 9 (WindowBits 31) .| CB.sinkHandle h
+        hClose h
+        body <- chunkedFile defaultChunkSize fpgz
+        uploadFromRIO key $
+            set poACL (Just OPublicRead) $ putObject (BucketName haddockBucketName) key body
+
+
+uploadFromRIO :: AWSRequest a => ObjectKey -> a -> RIO StackageCron ()
+uploadFromRIO key po = do
+    logInfo $ "Uploading " <> displayShow key <> " to S3 bucket."
+    env <- ask
+    eres <- runResourceT $ runAWS env $ trying _Error $ send po
+    case eres of
+        Left e ->
+            logError $ "Couldn't upload " <> displayShow key <> " to S3 becuase " <> displayShow e
+        Right _ -> logInfo $ "Successfully uploaded " <> displayShow key <> " to S3"
 
 -- #if !DEVELOPMENT
 
---     let upload :: FilePath -> ObjectKey -> IO ()
---         upload fp key = do
---             let fpgz = fp <.> "gz"
---             runConduitRes
---                $ sourceFile fp
---               .| compress 9 (WindowBits 31)
---               .| CB.sinkFile fpgz
---             body <- chunkedFile defaultChunkSize fpgz
---             let po =
---                       set poACL (Just OPublicRead)
---                    $  putObject "haddock.stackage.org" key body
---             putStrLn $ "Uploading: " ++ tshow key
---             eres <- runResourceT $ runAWS env $ trying _Error $ send po
---             case eres of
---                 Left e -> error $ show (fp, key, e)
---                 Right _ -> putStrLn "Success"
-
---     db <- openStackageDatabase dbfp
-
---     do
---         snapshots <- runReaderT snapshotsJSON db
---         let key = ObjectKey "snapshots.json"
---             po =
---                   set poACL (Just OPublicRead)
---                $  set poContentType (Just "application/json")
---                $  putObject (BucketName "haddock.stackage.org") key (toBody snapshots)
---         putStrLn $ "Uploading: " ++ tshow key
---         eres <- runResourceT $ runAWS env $ trying _Error $ send po
---         case eres of
---             Left e -> error $ show (key, e)
---             Right _ -> putStrLn "Success"
-
---     names <- runReaderT (lastXLts5Nightly 50) db
---     let manager = view envManager env
-
---     locker <- newHoogleLocker False manager
-
---     forM_ names $ \name -> do
---         mfp <- singleRun locker name
---         case mfp of
---             Just _ -> putStrLn $ "Hoogle database exists for: " ++ toPathPiece name
---             Nothing -> do
---                 mfp' <- createHoogleDB db manager name
---                 forM_ mfp' $ \fp -> do
---                     let key = hoogleKey name
---                     upload fp (ObjectKey key)
---                     let dest = T.unpack key
---                     createDirectoryIfMissing True $ takeDirectory dest
---                     renamePath fp dest
+buildAndUploadHoogleDB :: RIO StackageCron ()
+buildAndUploadHoogleDB = do
+    snapNames <- lastLtsNightly 50 5
+    env <- ask
+    locker <- newHoogleLocker (env ^. logFuncL) (env ^. envManager)
+    forM_ snapNames $ \snapName -> do
+        mfp <- singleRun locker snapName
+        case mfp of
+            Just _ -> logDebug $ "Hoogle database exists for: " <> display snapName
+            Nothing -> do
+                mfp' <- createHoogleDB snapName
+                forM_ mfp' $ \fp -> do
+                    let key = hoogleKey snapName
+                    uploadHoogleDB fp (ObjectKey key)
+                    let dest = T.unpack key
+                    createDirectoryIfMissing True $ takeDirectory dest
+                    renamePath fp dest
 -- #endif
 
--- createHoogleDB :: StackageDatabase -> Manager -> SnapName -> RIO Stackage (Maybe FilePath)
--- createHoogleDB db man name = handleAny (\e -> logError (display e) $> Nothing) $ do
---     logInfo $ "Creating Hoogle DB for " <> toPathPiece name
---     req' <- parseRequest $ T.unpack tarUrl
---     let req = req' { decompress = const True }
+createHoogleDB :: SnapName -> RIO StackageCron (Maybe FilePath)
+createHoogleDB snapName =
+    handleAny logException $ do
+        logInfo $ "Creating Hoogle DB for " <> display snapName
+        let root = "hoogle-gen"
+            bindir = root </> "bindir"
+            outname = root </> "output.hoo"
+            tarKey = toPathPiece snapName <> "/hoogle/orig.tar"
+            tarUrl = "https://s3.amazonaws.com/haddock.stackage.org/" <> tarKey
+            tarFP = root </> T.unpack tarKey
+        req' <- parseRequest $ T.unpack tarUrl
+        let req = req' {decompress = const True}
+        man <- view envManager
+        unlessM (doesFileExist tarFP) $
+            withResponseUnliftIO req man $ \res -> do
+                createDirectoryIfMissing True $ takeDirectory tarFP
+                withBinaryFileDurableAtomic tarFP WriteMode $ \tarHandle ->
+                    runConduitRes $ bodyReaderSource (responseBody res) .| sinkHandle tarHandle
+        void $ tryIO $ removeDirectoryRecursive bindir
+        void $ tryIO $ removeFile outname
+        createDirectoryIfMissing True bindir
 
---     unlessM (doesFileExist tarFP) $ withResponse req man $ \res -> do
---         let tmp = tarFP <.> "tmp"
---         createDirectoryIfMissing True $ takeDirectory tmp
---         runConduitRes
---            $ bodyReaderSource (responseBody res)
---           .| sinkFile tmp
---         renamePath tmp tarFP
+        withSystemTempDirectory ("hoogle-" ++ T.unpack (textDisplay snapName)) $ \tmpdir -> do
+            -- allPackagePairs <-
+            --     runConduitRes $
+            --     sourceTarFile False tarFP .| foldMapMC (singleDB snapName tmpdir)
+            --when (null allPackagePairs) $ error "No Hoogle .txt files found"
+            stackDir <- getAppUserDataDirectory "stack"
+            let indexTar = stackDir </> "indices" </> "Hackage" </> "00-index.tar"
+            -- withBinaryFile indexTar ReadMode $ \h -> do
+            --     let loop Tar.Done = return ()
+            --         loop (Tar.Fail e) = throwIO e
+            --         loop (Tar.Next e es) = go e >> loop es
+            --         go e =
+            --             case (Tar.entryContent e, splitPath $ Tar.entryPath e) of
+            --                 (Tar.NormalFile cabalLBS _, [pkg', ver', pkgcabal'])
+            --                     | Just pkg <- T.stripSuffix "/" (T.pack pkg')
+            --                     , Just ver <- T.stripSuffix "/" (T.pack ver')
+            --                     , Just pkg2 <- T.stripSuffix ".cabal" (T.pack pkgcabal')
+            --                     , pkg == pkg2
+            --                     , lookup pkg allPackagePairs == Just ver ->
+            --                         runConduitRes $
+            --                         sourceLazy cabalLBS .|
+            --                         sinkFile (tmpdir </> T.unpack pkg <.> "cabal")
+            --                 _ -> return ()
+            --     L.hGetContents h >>= loop . Tar.read
+            let args = ["generate", "--database=" ++ outname, "--local=" ++ tmpdir]
+            logInfo $ mconcat ["Merging databases... (", displayShow args, ")"]
+            liftIO $ Hoogle.hoogle args
+            logInfo "Merge done"
+            return $ Just outname
+  where
+    logException exc =
+        logError ("Problem creating hoogle db for " <> display snapName <> ": " <> displayShow exc) $>
+        Nothing
 
---     void $ tryIO $ removeDirectoryRecursive bindir
---     void $ tryIO $ removeFile outname
---     createDirectoryIfMissing True bindir
-
---     withSystemTempDirectory ("hoogle-" ++ T.unpack (toPathPiece name)) $ \tmpdir -> do
---         allPackagePairs <- runConduitRes
---             $ sourceTarFile False tarFP
---            .| foldMapMC (liftIO . singleDB db name tmpdir)
-
---         when (null allPackagePairs) $ error $ "No Hoogle .txt files found for " ++ T.unpack (toPathPiece name)
-
---         stackDir <- getAppUserDataDirectory "stack"
---         let indexTar = stackDir </> "indices" </> "Hackage" </> "00-index.tar"
---         withBinaryFile indexTar ReadMode $ \h -> do
---             let loop Tar.Done = return ()
---                 loop (Tar.Fail e) = throwIO e
---                 loop (Tar.Next e es) = go e >> loop es
-
---                 go e =
---                     case (Tar.entryContent e, splitPath $ Tar.entryPath e) of
---                         (Tar.NormalFile cabalLBS _, [pkg', ver', pkgcabal'])
---                           | Just pkg <- T.stripSuffix "/" (T.pack pkg')
---                           , Just ver <- T.stripSuffix "/" (T.pack ver')
---                           , Just pkg2 <- T.stripSuffix ".cabal" (T.pack pkgcabal')
---                           , pkg == pkg2
---                           , lookup pkg allPackagePairs == Just ver ->
---                                   runConduitRes
---                                 $ sourceLazy cabalLBS
---                                .| sinkFile (tmpdir </> T.unpack pkg <.> "cabal")
---                         _ -> return ()
---             L.hGetContents h >>= loop . Tar.read
-
---         let args =
---                 [ "generate"
---                 , "--database=" ++ outname
---                 , "--local=" ++ tmpdir
---                 ]
---         logInfo $ mconcat
---             [ "Merging databases... ("
---             , displayShow args
---             , ")"
---             ]
---         Hoogle.hoogle args
-
---         logInfo "Merge done"
-
---         return $ Just outname
---   where
---     root = "hoogle-gen"
---     bindir = root </> "bindir"
---     outname = root </> "output.hoo"
-
---     tarKey = toPathPiece name <> "/hoogle/orig.tar"
---     tarUrl = "https://s3.amazonaws.com/haddock.stackage.org/" <> tarKey
---     tarFP = root </> T.unpack tarKey
 
 -- singleDB :: StackageDatabase
 --          -> SnapName

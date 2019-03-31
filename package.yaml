@@ -42,7 +42,7 @@ dependencies:
 - resourcet
 - rio
 - shakespeare
-- tar
+- tar-conduit
 - template-haskell
 - temporary
 - text

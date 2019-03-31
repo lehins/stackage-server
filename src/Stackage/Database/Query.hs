@@ -15,7 +15,6 @@ module Stackage.Database.Query
     , snapshotBefore
     , lookupSnapshot
     , snapshotTitle
-    , last5Lts5Nightly
     , lastXLts5Nightly
     , snapshotsJSON
     , getLatestLtsByGhc
@@ -61,6 +60,8 @@ module Stackage.Database.Query
     , markModuleHasDocs
     , insertSnapshotPackageModules
     , insertDeps
+    -- ** For Hoogle db creation
+    , lastLtsNightly
     ) where
 
 import qualified Data.Aeson as A
@@ -152,9 +153,6 @@ ltsBefore x y = do
 
 
 
-last5Lts5Nightly :: GetStackageDatabase env m => m [SnapName]
-last5Lts5Nightly = lastXLts5Nightly 5
-
 lastXLts5Nightly :: GetStackageDatabase env m => Int -> m [SnapName]
 lastXLts5Nightly ltsCount = run $ do
     ls <- P.selectList [] [P.Desc LtsMajor, P.Desc LtsMinor, P.LimitTo ltsCount]
@@ -163,6 +161,16 @@ lastXLts5Nightly ltsCount = run $ do
   where
     l (Entity _ x) = SNLts (ltsMajor x) (ltsMinor x)
     n (Entity _ x) = SNNightly (nightlyDay x)
+
+lastLtsNightly :: GetStackageDatabase env m => Int -> Int -> m (Map SnapshotId SnapName)
+lastLtsNightly ltsCount nightlyCount =
+    run $ do
+        ls <- P.selectList [] [P.Desc LtsMajor, P.Desc LtsMinor, P.LimitTo ltsCount]
+        ns <- P.selectList [] [P.Desc NightlyDay, P.LimitTo nightlyCount]
+        Map.map snapshotName <$>
+            P.getMany (map (ltsSnap . P.entityVal) ls <> map (nightlySnap . P.entityVal) ns)
+
+-- sourceCabalFiles
 
 snapshotsJSON :: GetStackageDatabase env m => m A.Value
 snapshotsJSON = do
@@ -983,3 +991,4 @@ markModuleHasDocs snapshotId pid mSnapshotPackageId modName =
                 [toPersistValue modName, toPersistValue snapshotPackageId]
             return $ Just snapshotPackageId
         Nothing -> return Nothing
+

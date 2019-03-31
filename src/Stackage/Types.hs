@@ -9,34 +9,31 @@ module Stackage.Types
 
 import ClassyPrelude.Conduit
 import Data.Aeson
-import Control.Monad.Catch (MonadThrow, throwM)
-import Data.Typeable (TypeRep, Typeable, typeOf)
 import Pantry.Types (PackageNameP(..), VersionP(..))
 
 data BuildPlan = BuildPlan
-  { bpSystemInfo :: !SystemInfo
-  , bpPackages :: !(Map PackageNameP PackagePlan)
-  }
+    { bpSystemInfo :: !SystemInfo
+    , bpPackages :: !(Map PackageNameP PackagePlan)
+    }
 instance FromJSON BuildPlan where
-  parseJSON = withObject "BuildPlan" $ \o -> BuildPlan
-    <$> o .: "system-info"
-    <*> o .: "packages"
+    parseJSON = withObject "BuildPlan" $ \o -> BuildPlan
+        <$> o .: "system-info"
+        <*> o .: "packages"
 
 data SystemInfo = SystemInfo
-  { siGhcVersion :: !VersionP
-  , siCorePackages :: !(Map PackageNameP VersionP)
-  }
+    { siGhcVersion :: !VersionP
+    , siCorePackages :: !(Map PackageNameP VersionP)
+    }
 instance FromJSON SystemInfo where
-  parseJSON = withObject "SystemInfo" $ \o -> SystemInfo
-    <$> o .: "ghc-version"
-    <*> o .: "core-packages"
+    parseJSON = withObject "SystemInfo" $ \o -> SystemInfo
+        <$> o .: "ghc-version"
+        <*> o .: "core-packages"
 
-data PackagePlan = PackagePlan
-  { ppVersion :: VersionP
-  }
+newtype PackagePlan = PackagePlan
+    { ppVersion :: VersionP
+    }
 instance FromJSON PackagePlan where
-  parseJSON = withObject "PackagePlan" $ \o -> PackagePlan
-    <$> o .: "version"
+    parseJSON = withObject "PackagePlan" $ \o -> PackagePlan <$> o .: "version"
 
 type DocMap = Map Text PackageDocs
 
