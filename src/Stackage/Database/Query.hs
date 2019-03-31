@@ -313,8 +313,14 @@ getAllPackages =
                           , sp ^. SnapshotPackageSynopsis
                           , sp ^. SnapshotPackageOrigin)))
   where
-    toPackageListingInfo (Value snapName, Value pliName, Value pliVersion, Value pliSynopsis, Value pliOrigin) =
-        (snapName, PackageListingInfo {pliName, pliVersion, pliSynopsis, pliOrigin})
+    toPackageListingInfo (Value snapName, name, version, synopsis, origin) =
+        ( snapName
+        , PackageListingInfo
+              { pliName = unValue name
+              , pliVersion = unValue version
+              , pliSynopsis = unValue synopsis
+              , pliOrigin = unValue origin
+              })
 
 getPackagesForSnapshot :: GetStackageDatabase env m => SnapshotId -> m [PackageListingInfo]
 getPackagesForSnapshot snapshotId =

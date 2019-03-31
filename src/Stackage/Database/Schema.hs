@@ -106,8 +106,6 @@ SnapshotPackageModule
 Dep
     user SnapshotPackageId
     uses PackageNameId
---  TODO: potentially resolve dependencies upon import
---  usesInSnapshot SnapshotPackageId Maybe
     range VersionRangeP
     UniqueDep user uses
 Deprecated

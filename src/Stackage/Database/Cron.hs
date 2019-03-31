@@ -526,7 +526,8 @@ runProgressReporter loadedPackageCountRef totalPackages snapName = do
         loadedPackageCount <- readIORef loadedPackageCountRef
         let timeTotal = round (diffUTCTime after before)
             (mins, secs) = timeTotal `quotRem` (60 :: Int)
-            timePerPackage = timeTotal `div` loadedPackageCount
+            packagePerSecond =
+                fromIntegral ((loadedPackageCount * 100) `div` timeTotal) / 100 :: Float
         logInfo $
             mconcat
                 [ "Loading snapshot '"
@@ -536,8 +537,8 @@ runProgressReporter loadedPackageCountRef totalPackages snapName = do
                 , "min "
                 , displayShow secs
                 , "sec). With average "
-                , displayShow timePerPackage
-                , "sec spent per packages. There are still docs."
+                , displayShow packagePerSecond
+                , " packages/sec. There are still docs."
                 ]
   where
     reportProgress = do
