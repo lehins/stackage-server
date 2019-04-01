@@ -62,6 +62,7 @@ module Stackage.Database.Query
     , insertDeps
     -- ** For Hoogle db creation
     , lastLtsNightly
+    , getSnapshotPackageCabalBlob
     ) where
 
 import qualified Data.Aeson as A
@@ -170,7 +171,6 @@ lastLtsNightly ltsCount nightlyCount =
         Map.map snapshotName <$>
             P.getMany (map (ltsSnap . P.entityVal) ls <> map (nightlySnap . P.entityVal) ns)
 
--- sourceCabalFiles
 
 snapshotsJSON :: GetStackageDatabase env m => m A.Value
 snapshotsJSON = do
@@ -944,6 +944,19 @@ getSnapshotPackageId snapshotId (PackageIdentifierP pname ver) =
              (pn ^. PackageNameName ==. val pname) &&.
              (v ^. VersionVersion ==. val ver))
         return (sp ^. SnapshotPackageId)
+
+
+getSnapshotPackageCabalBlob ::
+       GetStackageDatabase env m => SnapshotId -> PackageNameP -> m (Maybe ByteString)
+getSnapshotPackageCabalBlob snapshotId pname =
+    run $ selectApplyMaybe unValue $
+    from $ \(blob `InnerJoin` sp `InnerJoin` pn) -> do
+        on (sp ^. SnapshotPackagePackageName ==. pn ^. PackageNameId)
+        on (just (blob ^. BlobId) ==. sp ^. SnapshotPackageCabal)
+        where_
+            ((sp ^. SnapshotPackageSnapshot ==. val snapshotId) &&.
+             (pn ^. PackageNameName ==. val pname))
+        return (blob ^. BlobContents)
 
 
 -- | Add all modules available for the package in a particular snapshot. Initially they are marked

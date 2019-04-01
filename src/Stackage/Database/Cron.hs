@@ -17,8 +17,10 @@ import qualified Control.Monad.Trans.AWS as AWS (paginate)
 import Control.SingleRun
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Conduit.Binary as CB
+import Data.Conduit.Tar (FileInfo(..), FileType(..), untar)
 import Data.Conduit.Zlib (WindowBits(WindowBits), compress, ungzip)
 import qualified Data.IntMap.Strict as IntMap
+import Data.Monoid (Any(..))
 import Data.Streaming.Network (bindPortTCP)
 import Data.Yaml (decodeFileEither)
 import Database.Persist
@@ -103,7 +105,7 @@ newHoogleLocker ::
        (HasLogFunc env, MonadIO m) => env -> Manager -> m (SingleRun SnapName (Maybe FilePath))
 newHoogleLocker env man = mkSingleRun hoogleLocker
   where
-    hoogleLocker :: MonadIO m => SnapName -> m (Maybe FilePath)
+    hoogleLocker :: MonadIO n => SnapName -> n (Maybe FilePath)
     hoogleLocker name =
         runRIO env $ do
             let fp = T.unpack $ hoogleKey name
@@ -143,7 +145,8 @@ stackageServerCron forceUpdate = do
         -- Hacky approach instead of PID files
         catchIO (bindPortTCP 17834 "127.0.0.1") $
         const $ throwString "Stackage Cron loader process already running, exiting."
-    connectionCount <- getNumCapabilities
+    -- experimentally found these to be best number of connections
+    connectionCount <- max 2 . subtract 2 <$> getNumCapabilities
     storage <- initStorage connectionCount
     lo <- logOptionsHandle stdout True
     stackageRootDir <- getAppUserDataDirectory "stackage"
@@ -197,8 +200,8 @@ runStackageUpdate = do
         runConduit $ sourceSnapshots .| foldMC (createOrUpdateSnapshot corePackageGetters) (pure ())
     run $ mapM_ (`rawExecute` []) ["COMMIT", "VACUUM", "BEGIN"]
 
-    -- uploadSnapshotsJSON
-    -- buildAndUploadHoogleDB
+    uploadSnapshotsJSON
+    buildAndUploadHoogleDB
 
 
 -- | This will look at 'global-hints.yaml' and will create core package getters that are reused
@@ -462,9 +465,15 @@ createOrUpdateSnapshot ::
     -> ResourceT (RIO StackageCron) ()
     -> (SnapName, UTCTime, RIO StackageCron (Maybe SnapshotFile))
     -> ResourceT (RIO StackageCron) (ResourceT (RIO StackageCron) ())
-createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo@(_, updatedOn, _) =
-    snd <$> concurrently prevAction (lift loadCurrentSnapshot)
-    --todo: logSticky "Still loading the docs for previous snapshot ..."
+createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo@(_, updatedOn, _) = do
+    finishedDocs <- newIORef False
+    snd <$>
+        concurrently
+            (prevAction >> writeIORef finishedDocs True)
+            (do loadDocs <- lift loadCurrentSnapshot
+                unlessM (readIORef finishedDocs) $
+                    logSticky "Still loading the docs for previous snapshot ..."
+                pure loadDocs)
   where
     loadCurrentSnapshot =
         decideOnSnapshotUpdate snapInfo >>= \case
@@ -559,6 +568,7 @@ runProgressReporter loadedPackageCountRef totalPackages snapName = do
                 ]
         threadDelay 1000000
 
+-- | Uploads a json file to S3 with all latest snapshots per major lts version and one nightly.
 uploadSnapshotsJSON :: RIO StackageCron ()
 uploadSnapshotsJSON = do
     snapshots <- snapshotsJSON
@@ -590,29 +600,26 @@ uploadFromRIO key po = do
             logError $ "Couldn't upload " <> displayShow key <> " to S3 becuase " <> displayShow e
         Right _ -> logInfo $ "Successfully uploaded " <> displayShow key <> " to S3"
 
--- #if !DEVELOPMENT
-
 buildAndUploadHoogleDB :: RIO StackageCron ()
 buildAndUploadHoogleDB = do
-    snapNames <- lastLtsNightly 50 5
+    snapshots <- lastLtsNightly 50 5
     env <- ask
     locker <- newHoogleLocker (env ^. logFuncL) (env ^. envManager)
-    forM_ snapNames $ \snapName -> do
+    void $ flip Map.traverseWithKey snapshots $ \snapshotId snapName -> do
         mfp <- singleRun locker snapName
         case mfp of
             Just _ -> logDebug $ "Hoogle database exists for: " <> display snapName
             Nothing -> do
-                mfp' <- createHoogleDB snapName
+                mfp' <- createHoogleDB snapshotId snapName
                 forM_ mfp' $ \fp -> do
                     let key = hoogleKey snapName
                     uploadHoogleDB fp (ObjectKey key)
                     let dest = T.unpack key
                     createDirectoryIfMissing True $ takeDirectory dest
                     renamePath fp dest
--- #endif
 
-createHoogleDB :: SnapName -> RIO StackageCron (Maybe FilePath)
-createHoogleDB snapName =
+createHoogleDB :: SnapshotId -> SnapName -> RIO StackageCron (Maybe FilePath)
+createHoogleDB snapshotId snapName =
     handleAny logException $ do
         logInfo $ "Creating Hoogle DB for " <> display snapName
         let root = "hoogle-gen"
@@ -632,31 +639,12 @@ createHoogleDB snapName =
         void $ tryIO $ removeDirectoryRecursive bindir
         void $ tryIO $ removeFile outname
         createDirectoryIfMissing True bindir
-
         withSystemTempDirectory ("hoogle-" ++ T.unpack (textDisplay snapName)) $ \tmpdir -> do
-            -- allPackagePairs <-
-            --     runConduitRes $
-            --     sourceTarFile False tarFP .| foldMapMC (singleDB snapName tmpdir)
-            --when (null allPackagePairs) $ error "No Hoogle .txt files found"
-            stackDir <- getAppUserDataDirectory "stack"
-            let indexTar = stackDir </> "indices" </> "Hackage" </> "00-index.tar"
-            -- withBinaryFile indexTar ReadMode $ \h -> do
-            --     let loop Tar.Done = return ()
-            --         loop (Tar.Fail e) = throwIO e
-            --         loop (Tar.Next e es) = go e >> loop es
-            --         go e =
-            --             case (Tar.entryContent e, splitPath $ Tar.entryPath e) of
-            --                 (Tar.NormalFile cabalLBS _, [pkg', ver', pkgcabal'])
-            --                     | Just pkg <- T.stripSuffix "/" (T.pack pkg')
-            --                     , Just ver <- T.stripSuffix "/" (T.pack ver')
-            --                     , Just pkg2 <- T.stripSuffix ".cabal" (T.pack pkgcabal')
-            --                     , pkg == pkg2
-            --                     , lookup pkg allPackagePairs == Just ver ->
-            --                         runConduitRes $
-            --                         sourceLazy cabalLBS .|
-            --                         sinkFile (tmpdir </> T.unpack pkg <.> "cabal")
-            --                 _ -> return ()
-            --     L.hGetContents h >>= loop . Tar.read
+            Any hasRestored <-
+                runConduitRes $
+                sourceFile tarFP .|
+                untar (restoreHoogleTxtFileWithCabal tmpdir snapshotId snapName) .| foldC
+            unless hasRestored $ error "No Hoogle .txt files found"
             let args = ["generate", "--database=" ++ outname, "--local=" ++ tmpdir]
             logInfo $ mconcat ["Merging databases... (", displayShow args, ")"]
             liftIO $ Hoogle.hoogle args
@@ -666,6 +654,32 @@ createHoogleDB snapName =
     logException exc =
         logError ("Problem creating hoogle db for " <> display snapName <> ": " <> displayShow exc) $>
         Nothing
+
+restoreHoogleTxtFileWithCabal ::
+       FilePath
+    -> SnapshotId
+    -> SnapName
+    -> FileInfo
+    -> ConduitM ByteString Any (ResourceT (RIO StackageCron)) ()
+restoreHoogleTxtFileWithCabal tmpdir snapshotId snapName fileInfo =
+    case fileType fileInfo of
+        FTNormal -> do
+            let txtFileName = T.decodeUtf8With T.lenientDecode $ filePath fileInfo
+                txtPackageName = T.takeWhile (/= '.') txtFileName
+                mpkg = fromPathPiece txtPackageName
+            maybe (pure Nothing) (lift . lift . getSnapshotPackageCabalBlob snapshotId) mpkg >>= \case
+                Nothing -> do
+                    logWarn $
+                        "Unexpected hoogle filename: " <> display txtFileName <>
+                        " in orig.tar for snapshot: " <>
+                        display snapName
+                    yield $ Any False
+                Just cabal -> do
+                    writeFileBinary (tmpdir </> T.unpack txtPackageName <.> "cabal") cabal
+                    sinkFile (tmpdir </> T.unpack txtFileName)
+                    yield $ Any True
+        _ -> yield $ Any False
+
 
 
 -- singleDB :: StackageDatabase
