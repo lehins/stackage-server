@@ -41,15 +41,14 @@ import Pantry (defaultHackageSecurityConfig)
 import Pantry.Hackage (DidUpdateOccur(..), forceUpdateHackageIndex,
                        getHackageTarballOnGPD)
 import Pantry.Storage (HackageCabalId, getTreeForKey, loadBlobById, treeCabal)
-import Pantry.Types (CabalFileInfo(..), HasPantryConfig(..),
-                     HpackExecutable(HpackBundled),
+import Pantry.Types (CabalFileInfo(..), HpackExecutable(HpackBundled),
                      PackageIdentifierRevision(..), PantryConfig(..),
                      packageTreeKey)
 import Path (parseAbsDir, toFilePath)
 import RIO
 import RIO.Directory
-import RIO.List as L
 import RIO.FilePath
+import RIO.List as L
 import qualified RIO.Map as Map
 import RIO.Process (mkDefaultProcessContext)
 import qualified RIO.Set as Set
@@ -162,8 +161,7 @@ stackageServerCron StackageCronOptions{..} = do
         -- Hacky approach instead of PID files
         catchIO (bindPortTCP 17834 "127.0.0.1") $
         const $ throwString "Stackage Cron loader process already running, exiting."
-    -- experimentally found these to be best number of connections
-    connectionCount <- max 2 . subtract 2 <$> getNumCapabilities
+    connectionCount <- getNumCapabilities
     storage <- initStorage connectionCount
     lo <- logOptionsHandle stdout True
     stackageRootDir <- getAppUserDataDirectory "stackage"
@@ -353,7 +351,7 @@ checkForDocs snapshotId snapName = do
     sidsCacheRef <- newIORef Map.empty
     -- Cache is for SnapshotPackageId, there will be many modules per peckage, no need to look into
     -- the database for each one of them.
-    n <- max 1 . (`div` 2) . pcConnectionCount <$> view pantryConfigL
+    n <- max 1 . (`div` 2) <$> getNumCapabilities
     notFoundList <- lift $ pooledMapConcurrentlyN n (markModules sidsCacheRef) mods
     forM_ (Set.fromList $ catMaybes notFoundList) $ \pid ->
         lift $
@@ -531,11 +529,11 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
             atomicModifyIORef' loadedPackageCountRef (\c -> (c + 1, ()))
             pure curSucc
     -- Leave some cores and db connections for the doc loader
-    connCount <- max 1 . (`div` 2) . pcConnectionCount <$> view pantryConfigL
+    n <- max 1 . (`div` 2) <$> getNumCapabilities
     ePantryUpdatesSucceeded <-
         race
             (runProgressReporter loadedPackageCountRef totalPackages sfName)
-            (pooledMapConcurrentlyN connCount addPantryPackageWithReport sfPackages)
+            (pooledMapConcurrentlyN n addPantryPackageWithReport sfPackages)
     let pantryUpdateSucceeded = either (const False) and ePantryUpdatesSucceeded
     return $ do
         checkForDocsSucceeded <-
