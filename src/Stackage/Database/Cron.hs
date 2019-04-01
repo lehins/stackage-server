@@ -48,7 +48,6 @@ import Pantry.Types (CabalFileInfo(..), HasPantryConfig(..),
 import Path (parseAbsDir, toFilePath)
 import RIO
 import RIO.Directory
-import RIO.File
 import RIO.List as L
 import RIO.FilePath
 import qualified RIO.Map as Map
