@@ -35,11 +35,11 @@ getGhcMajorVersionR name = track "Hoogle.Download.getGhcMajorVersionR" $ do
     return $ ghcMajorVersionText $ entityVal snapshot
 
 getDownloadGhcLinksR :: SupportedArch -> Text -> Handler TypedContent
-getDownloadGhcLinksR arch fileName =
+getDownloadGhcLinksR arch fName =
     track "Hoogle.Download.getDownloadGhcLinksR" $ do
         ver <-
             maybe notFound return $
-            stripPrefix "ghc-" >=> stripSuffix "-links.yaml" >=> ghcMajorVersionFromText $ fileName
+            stripPrefix "ghc-" >=> stripSuffix "-links.yaml" >=> ghcMajorVersionFromText $ fName
         ghcLinks <- getYesod >>= fmap wcGhcLinks . liftIO . grContent . appWebsiteContent
         case lookup (arch, ver) (ghcLinksMap ghcLinks) of
             Just text -> return $ TypedContent yamlMimeType $ toContent text

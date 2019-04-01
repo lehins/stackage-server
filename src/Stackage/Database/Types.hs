@@ -12,7 +12,7 @@ module Stackage.Database.Types
     , FlagNameP(..)
     , StackageCron(..)
     , PantryCabal(..)
-    , BlobKey (..)
+    , BlobKey(..)
     , GenericPackageDescription
     , toPackageIdentifierRevision
     , PantryPackage(..)
@@ -42,6 +42,7 @@ module Stackage.Database.Types
     , haddockBucketName
     , Changelog(..)
     , Readme(..)
+    , StackageCronOptions(..)
     ) where
 
 import Data.Aeson
@@ -63,14 +64,24 @@ haddockBucketName :: Text
 haddockBucketName = "haddock.stackage.org"
 
 
+data StackageCronOptions = StackageCronOptions
+  { scoForceUpdate        :: !Bool
+  , scoDownloadBucketName :: !Text
+  , scoUploadBucketName   :: !Text
+  , scoDoNotUpload        :: !Bool
+  , scoLogLevel           :: !LogLevel
+  }
+
 data StackageCron = StackageCron
-    { scPantryConfig    :: !PantryConfig
-    , scStackageRoot    :: !FilePath
-    , scLogFunc         :: !LogFunc
-    , scProcessContext  :: !ProcessContext
-    , scForceFullUpdate :: !Bool
-    , scCachedGPD       :: !(IORef (IntMap GenericPackageDescription))
-    , scEnvAWS          :: !Env
+    { scPantryConfig       :: !PantryConfig
+    , scStackageRoot       :: !FilePath
+    , scLogFunc            :: !LogFunc
+    , scProcessContext     :: !ProcessContext
+    , scForceFullUpdate    :: !Bool
+    , scCachedGPD          :: !(IORef (IntMap GenericPackageDescription))
+    , scEnvAWS             :: !Env
+    , scDownloadBucketName :: !Text
+    , scUploadBucketName   :: !Text
     }
 
 instance HasEnv StackageCron where

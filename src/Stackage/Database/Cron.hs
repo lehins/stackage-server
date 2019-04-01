@@ -9,6 +9,8 @@ module Stackage.Database.Cron
     ( stackageServerCron
     , newHoogleLocker
     , singleRun
+    , StackageCronOptions(..)
+    , haddockBucketName
     ) where
 
 import Conduit
@@ -34,7 +36,7 @@ import Network.AWS.S3
 import Network.HTTP.Client
 import Network.HTTP.Client.Conduit (bodyReaderSource)
 import Network.HTTP.Simple (getResponseBody, httpJSONEither, parseRequest)
-import Network.HTTP.Types (status200)
+import Network.HTTP.Types (status200, status404)
 import Pantry (defaultHackageSecurityConfig)
 import Pantry.Hackage (DidUpdateOccur(..), forceUpdateHackageIndex,
                        getHackageTarballOnGPD)
@@ -47,6 +49,7 @@ import Path (parseAbsDir, toFilePath)
 import RIO
 import RIO.Directory
 import RIO.File
+import RIO.List as L
 import RIO.FilePath
 import qualified RIO.Map as Map
 import RIO.Process (mkDefaultProcessContext)
@@ -117,14 +120,29 @@ newHoogleLocker env man = mkSingleRun hoogleLocker
                     req' <- parseRequest $ T.unpack $ hoogleUrl name
                     let req = req' {decompress = const False}
                     withResponseUnliftIO req man $ \res ->
-                        if responseStatus res == status200
-                            then do
-                                createDirectoryIfMissing True $ takeDirectory fptmp
-                                runConduitRes $
-                                    bodyReaderSource (responseBody res) .| ungzip .| sinkFile fptmp
-                                renamePath fptmp fp
-                                return $ Just fp
-                            else return Nothing
+                        case responseStatus res of
+                            status
+                                | status == status200 -> do
+                                    createDirectoryIfMissing True $ takeDirectory fptmp
+                                    -- TODO: https://github.com/commercialhaskell/rio/issues/160
+                                    -- withBinaryFileDurableAtomic fp WriteMode $ \h ->
+                                    --     runConduitRes $
+                                    --     bodyReaderSource (responseBody res) .| ungzip .|
+                                    --     sinkHandle h
+                                    runConduitRes $
+                                        bodyReaderSource (responseBody res) .| ungzip .|
+                                        sinkFile fptmp
+                                    renamePath fptmp fp
+                                    return $ Just fp
+                                | status == status404 -> do
+                                    logDebug $ "NotFound: " <> display (hoogleUrl name)
+                                    return Nothing
+                                | otherwise -> do
+                                    body <- liftIO $ brConsume $ responseBody res
+                                    -- TODO: ideally only consume the body when log level set to
+                                    -- LevelDebug, will require a way to get LogLevel from LogFunc
+                                    mapM_ (logDebug . displayBytesUtf8) body
+                                    return Nothing
 
 getHackageDeprecations ::
        (HasLogFunc env, MonadReader env m, MonadIO m) => m [Deprecation]
@@ -139,8 +157,8 @@ getHackageDeprecations = do
         Right deprecated -> return deprecated
 
 
-stackageServerCron :: Bool -> IO ()
-stackageServerCron forceUpdate = do
+stackageServerCron :: StackageCronOptions -> IO ()
+stackageServerCron StackageCronOptions{..} = do
     void $
         -- Hacky approach instead of PID files
         catchIO (bindPortTCP 17834 "127.0.0.1") $
@@ -158,7 +176,7 @@ stackageServerCron forceUpdate = do
     gpdCache <- newIORef IntMap.empty
     defaultProcessContext <- mkDefaultProcessContext
     aws <- newEnv Discover
-    withLogFunc (setLogMinLevel LevelInfo lo) $ \logFunc ->
+    withLogFunc (setLogMinLevel scoLogLevel lo) $ \logFunc ->
         let pantryConfig =
                 PantryConfig
                     { pcHackageSecurity = defaultHackageSecurityConfig
@@ -176,15 +194,17 @@ stackageServerCron forceUpdate = do
                     , scStackageRoot = stackageRootDir
                     , scProcessContext = defaultProcessContext
                     , scLogFunc = logFunc
-                    , scForceFullUpdate = forceUpdate
+                    , scForceFullUpdate = scoForceUpdate
                     , scCachedGPD = gpdCache
                     , scEnvAWS = aws
+                    , scDownloadBucketName = scoDownloadBucketName
+                    , scUploadBucketName = scoUploadBucketName
                     }
-         in runRIO stackage runStackageUpdate
+         in runRIO stackage (runStackageUpdate scoDoNotUpload)
 
 
-runStackageUpdate :: RIO StackageCron ()
-runStackageUpdate = do
+runStackageUpdate :: Bool -> RIO StackageCron ()
+runStackageUpdate doNotUpload = do
     forceFullUpdate <- scForceFullUpdate <$> ask
     logInfo $ "Starting stackage-cron update" <> bool "" " with --force-update" forceFullUpdate
     runStackageMigrations
@@ -199,9 +219,9 @@ runStackageUpdate = do
         join $
         runConduit $ sourceSnapshots .| foldMC (createOrUpdateSnapshot corePackageGetters) (pure ())
     run $ mapM_ (`rawExecute` []) ["COMMIT", "VACUUM", "BEGIN"]
-
-    uploadSnapshotsJSON
-    buildAndUploadHoogleDB
+    unless doNotUpload $ do
+        uploadSnapshotsJSON
+        buildAndUploadHoogleDB
 
 
 -- | This will look at 'global-hints.yaml' and will create core package getters that are reused
@@ -320,9 +340,11 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
 -- in the database which modules have documentation available for them.
 checkForDocs :: SnapshotId -> SnapName -> ResourceT (RIO StackageCron) ()
 checkForDocs snapshotId snapName = do
+    bucketName <- lift (scDownloadBucketName <$> ask)
     mods <-
         runConduit $
-        AWS.paginate req .| concatMapC (^. lovrsContents) .| mapC (\obj -> toText (obj ^. oKey)) .|
+        AWS.paginate (req bucketName) .| concatMapC (^. lovrsContents) .|
+        mapC (\obj -> toText (obj ^. oKey)) .|
         concatMapC (T.stripSuffix ".html") .|
         concatMapC (T.stripPrefix prefix) .|
         concatMapC pathToPackageModule .|
@@ -342,7 +364,7 @@ checkForDocs snapshotId snapName = do
         display snapName
   where
     prefix = textDisplay snapName <> "/"
-    req = listObjectsV2 (BucketName haddockBucketName) & lovPrefix .~ Just prefix
+    req bucketName = listObjectsV2 (BucketName bucketName) & lovPrefix .~ Just prefix
     -- | This function records all package modules that have documentation available, the ones
     -- that are not found in the snapshot reported back as an error.  Besides being run
     -- concurrently this function optimizes the SnapshotPackageId lookup as well, since that can
@@ -572,11 +594,12 @@ runProgressReporter loadedPackageCountRef totalPackages snapName = do
 uploadSnapshotsJSON :: RIO StackageCron ()
 uploadSnapshotsJSON = do
     snapshots <- snapshotsJSON
+    uploadBucket <- scUploadBucketName <$> ask
     let key = ObjectKey "snapshots.json"
     uploadFromRIO key $
         set poACL (Just OPublicRead) $
         set poContentType (Just "application/json") $
-        putObject (BucketName haddockBucketName) key (toBody snapshots)
+        putObject (BucketName uploadBucket) key (toBody snapshots)
 
 -- | Writes a gzipped version of hoogle db into temporary file onto the file system and then uploads
 -- it to S3. Temporary file is removed upon completion
@@ -586,8 +609,9 @@ uploadHoogleDB fp key =
         runConduitRes $ sourceFile fp .| compress 9 (WindowBits 31) .| CB.sinkHandle h
         hClose h
         body <- chunkedFile defaultChunkSize fpgz
+        uploadBucket <- scUploadBucketName <$> ask
         uploadFromRIO key $
-            set poACL (Just OPublicRead) $ putObject (BucketName haddockBucketName) key body
+            set poACL (Just OPublicRead) $ putObject (BucketName uploadBucket) key body
 
 
 uploadFromRIO :: AWSRequest a => ObjectKey -> a -> RIO StackageCron ()
@@ -606,6 +630,7 @@ buildAndUploadHoogleDB = do
     env <- ask
     locker <- newHoogleLocker (env ^. logFuncL) (env ^. envManager)
     void $ flip Map.traverseWithKey snapshots $ \snapshotId snapName -> do
+        logDebug $ "Starting Hoogle DB download: " <> display (hoogleKey snapName)
         mfp <- singleRun locker snapName
         case mfp of
             Just _ -> logDebug $ "Hoogle database exists for: " <> display snapName
@@ -622,31 +647,41 @@ createHoogleDB :: SnapshotId -> SnapName -> RIO StackageCron (Maybe FilePath)
 createHoogleDB snapshotId snapName =
     handleAny logException $ do
         logInfo $ "Creating Hoogle DB for " <> display snapName
+        downloadBucket <- scDownloadBucketName <$> ask
         let root = "hoogle-gen"
             bindir = root </> "bindir"
             outname = root </> "output.hoo"
             tarKey = toPathPiece snapName <> "/hoogle/orig.tar"
-            tarUrl = "https://s3.amazonaws.com/haddock.stackage.org/" <> tarKey
+            tarUrl = "https://s3.amazonaws.com/" <> downloadBucket <> "/" <> tarKey
             tarFP = root </> T.unpack tarKey
-        req' <- parseRequest $ T.unpack tarUrl
-        let req = req' {decompress = const True}
+        req <- parseRequest $ T.unpack tarUrl
         man <- view envManager
         unlessM (doesFileExist tarFP) $
-            withResponseUnliftIO req man $ \res -> do
+            withResponseUnliftIO req {decompress = const True} man $ \res -> do
+                throwErrorStatusCodes req res
                 createDirectoryIfMissing True $ takeDirectory tarFP
-                withBinaryFileDurableAtomic tarFP WriteMode $ \tarHandle ->
+                --withBinaryFileDurableAtomic tarFP WriteMode $ \tarHandle ->
+                --FIXME: https://github.com/commercialhaskell/rio/issues/160
+                let tmpTarFP = tarFP <.> "tmp"
+                withBinaryFile tmpTarFP WriteMode $ \tarHandle ->
                     runConduitRes $ bodyReaderSource (responseBody res) .| sinkHandle tarHandle
+                renameFile tmpTarFP tarFP
         void $ tryIO $ removeDirectoryRecursive bindir
         void $ tryIO $ removeFile outname
         createDirectoryIfMissing True bindir
         withSystemTempDirectory ("hoogle-" ++ T.unpack (textDisplay snapName)) $ \tmpdir -> do
             Any hasRestored <-
                 runConduitRes $
-                sourceFile tarFP .|
-                untar (restoreHoogleTxtFileWithCabal tmpdir snapshotId snapName) .| foldC
+                sourceFile tarFP .| untar (restoreHoogleTxtFileWithCabal tmpdir snapshotId snapName) .|
+                foldC
             unless hasRestored $ error "No Hoogle .txt files found"
             let args = ["generate", "--database=" ++ outname, "--local=" ++ tmpdir]
-            logInfo $ mconcat ["Merging databases... (", displayShow args, ")"]
+            logInfo $
+                mconcat
+                    [ "Merging databases... ("
+                    , foldMap fromString $ L.intersperse " " ("hoogle" : args)
+                    , ")"
+                    ]
             liftIO $ Hoogle.hoogle args
             logInfo "Merge done"
             return $ Just outname
@@ -680,88 +715,6 @@ restoreHoogleTxtFileWithCabal tmpdir snapshotId snapName fileInfo =
                     yield $ Any True
         _ -> yield $ Any False
 
-
-
--- singleDB :: StackageDatabase
---          -> SnapName
---          -> FilePath -- ^ temp directory to write .txt files to
---          -> Tar.Entry
---          -> IO (Map Text Text)
--- singleDB db sname tmpdir e@(Tar.entryContent -> Tar.NormalFile lbs _) = do
---     --putStrLn $ "Loading file for Hoogle: " ++ pack (Tar.entryPath e)
-
---     let pkg = pack $ takeWhile (/= '.') $ Tar.entryPath e
---     msp <- flip runReaderT db $ do
---         Just (Entity sid _) <- lookupSnapshot sname
---         lookupSnapshotPackage sid pkg
---     case msp of
---         Nothing -> do
---             putStrLn $ "Unknown: " ++ pkg
---             return mempty
---         Just (Entity _ sp)  -> do
---             let out = tmpdir </> T.unpack pkg <.> "txt"
---                 -- FIXME add @url directive
---             runConduitRes $ sourceLazy lbs .| sinkFile out
---             return $ Map.singleton pkg (snapshotPackageVersion sp)
---                 {-
---                 docsUrl = concat
---                     [ "https://www.stackage.org/haddock/"
---                     , toPathPiece sname
---                     , "/"
---                     , pkgver
---                     , "/index.html"
---                     ] -}
-
--- singleDB _ _ _ _ = return mempty
-
-
--- -- | Same as `getHackageTarball`, but allows an extra action to be performed on the parsed
--- -- `GenericPackageDescription` and newly created `TreeId`.
--- ensureHackageTarball
---   :: (HasPantryConfig env, HasLogFunc env)
---   => (TreeId -> GenericPackageDescription -> RIO env ())
---   -> PackageIdentiferRevision
---   -> Maybe TreeKey
---   -> RIO env Package
--- ensureHackageTarball onGPD pir mExpTreeKey = do
---   let PackageIdentifierRevision name ver cfi = pir
---   mbidTreeKey <-
---     withStorage $
---           case cfi of
---             CFIHash sha _ -> do
---               mbid <- loadBlobBySHA sha
---               case mbid of
---                 Just bid -> do
---                   mtreeKey <- loadHackageTreeKey name ver sha
---                   return $ Just (bid, mtreeKey)
---                 Nothing -> Nothing
---             CFIRevision rev -> do
---               revs <- loadHackagePackageVersion name ver
---               case Map.lookup rev revs of
---                 Just (bid, (BlobKey sha _)) -> do
---                   mtreeKey <- loadHackageTreeKey name ver sha
---                   return $ Just (bid, mtreeKey)
---                 Nothing -> return Nothing
---             cfi -> error $ "Unsupported selector: " <> show cfi
---   -- See if the hackage package has already been loaded
---   case mbidTreeKey of
---     Nothing -> logError $ "Unknown package to hackage: " <> display pir
---     (_, Just treeKey)
---       | Just expTreeKey <- mExpTreeKey, expTreeKey /= treeKey ->
---         logError $ "TreeKey received does not match for: " <> display pir
---     (bid, Just treeKey) -> return bid
---     (bid, Nothing) -> do
---         pc <- view pantryConfigL
---         let urlPrefix = hscDownloadPrefix $ pcHackageSecurity pc
---             url = mconcat
---               [ urlPrefix
---               , "package/"
---               , T.pack $ Distribution.Text.display name
---               , "-"
---               , T.pack $ Distribution.Text.display ver
---               , ".tar.gz"
---               ]
---   -- TODO: load just the files that are needed (readme and chagelog)
 
 pathToPackageModule :: Text -> Maybe (PackageIdentifierP, ModuleNameP)
 pathToPackageModule txt =

@@ -134,6 +134,8 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
+    - optparse-applicative
+    - rio
     - stackage-server
     when:
     - condition: flag(library-only)
