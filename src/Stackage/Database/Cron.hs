@@ -486,19 +486,19 @@ createOrUpdateSnapshot ::
     -> ResourceT (RIO StackageCron) (ResourceT (RIO StackageCron) ())
 createOrUpdateSnapshot corePackageInfoGetters prevAction snapInfo@(_, updatedOn, _) = do
     finishedDocs <- newIORef False
-    snd <$>
-        concurrently
-            (prevAction >> writeIORef finishedDocs True)
-            (do loadDocs <- lift loadCurrentSnapshot
-                unlessM (readIORef finishedDocs) $
-                    logSticky "Still loading the docs for previous snapshot ..."
-                pure loadDocs)
+    runConcurrently
+        (Concurrently (prevAction >> writeIORef finishedDocs True) *>
+         Concurrently (lift (loadCurrentSnapshot finishedDocs)))
   where
-    loadCurrentSnapshot =
-        decideOnSnapshotUpdate snapInfo >>= \case
-            Nothing -> return $ pure ()
-            Just (snapshotId, snapshotFile) ->
-                updateSnapshot corePackageInfoGetters snapshotId updatedOn snapshotFile
+    loadCurrentSnapshot finishedDocs = do
+        loadDocs <-
+            decideOnSnapshotUpdate snapInfo >>= \case
+                Nothing -> return $ pure ()
+                Just (snapshotId, snapshotFile) ->
+                    updateSnapshot corePackageInfoGetters snapshotId updatedOn snapshotFile
+        unlessM (readIORef finishedDocs) $
+            logSticky "Still loading the docs for previous snapshot ..."
+        pure loadDocs
 
 -- | Updates all packages in the snapshot. If any missing they will be created. Returns an action
 -- that will check for available documentation for modules that are known to exist and mark as
@@ -530,11 +530,10 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
             pure curSucc
     -- Leave some cores and db connections for the doc loader
     n <- max 1 . (`div` 2) <$> getNumCapabilities
-    ePantryUpdatesSucceeded <-
-        race
-            (runProgressReporter loadedPackageCountRef totalPackages sfName)
-            (pooledMapConcurrentlyN n addPantryPackageWithReport sfPackages)
-    let pantryUpdateSucceeded = either (const False) and ePantryUpdatesSucceeded
+    pantryUpdatesSucceeded <-
+        runConcurrently
+            (Concurrently (runProgressReporter loadedPackageCountRef totalPackages sfName) *>
+             Concurrently (pooledMapConcurrentlyN n addPantryPackageWithReport sfPackages))
     return $ do
         checkForDocsSucceeded <-
             tryAny (checkForDocs snapshotId sfName) >>= \case
@@ -542,7 +541,7 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
                     logError $ "Received exception while getting the docs: " <> displayShow exc
                     return False
                 Right () -> return True
-        if pantryUpdateSucceeded && checkForDocsSucceeded
+        if and pantryUpdatesSucceeded && checkForDocsSucceeded
             then do
                 lift $ snapshotMarkUpdated snapshotId updatedOn
                 logInfo $ "Created or updated snapshot '" <> display sfName <> "' successfully"
@@ -550,42 +549,44 @@ updateSnapshot corePackageGetters snapshotId updatedOn SnapshotFile {..} = do
 
 
 -- | Report how many packages has been loaded so far and provide statistics at the end.
-runProgressReporter :: IORef Int -> Int -> SnapName -> RIO StackageCron Void
+runProgressReporter :: IORef Int -> Int -> SnapName -> RIO StackageCron ()
 runProgressReporter loadedPackageCountRef totalPackages snapName = do
     before <- getCurrentTime
-    finally (forever reportProgress) $ do
-        after <- getCurrentTime
-        loadedPackageCount <- readIORef loadedPackageCountRef
-        let timeTotal = round (diffUTCTime after before)
-            (mins, secs) = timeTotal `quotRem` (60 :: Int)
-            packagePerSecond =
-                fromIntegral ((loadedPackageCount * 100) `div` timeTotal) / 100 :: Float
-        logInfo $
-            mconcat
-                [ "Loading snapshot '"
-                , display snapName
-                , "' was done (in "
-                , displayShow mins
-                , "min "
-                , displayShow secs
-                , "sec). With average "
-                , displayShow packagePerSecond
-                , " packages/sec. There are still docs."
-                ]
-  where
-    reportProgress = do
-        loadedPackageCount <- readIORef loadedPackageCountRef
-        logSticky $
-            mconcat
-                [ "Loading snapshot '"
-                , display snapName
-                , "' ("
-                , displayShow loadedPackageCount
-                , "/"
-                , displayShow totalPackages
-                , ")"
-                ]
-        threadDelay 1000000
+    let reportProgress = do
+            loadedPackageCount <- readIORef loadedPackageCountRef
+            if loadedPackageCount < totalPackages
+                then do
+                    logSticky $
+                        mconcat
+                            [ "Loading snapshot '"
+                            , display snapName
+                            , "' ("
+                            , displayShow loadedPackageCount
+                            , "/"
+                            , displayShow totalPackages
+                            , ")"
+                            ]
+                    threadDelay 1000000
+                    reportProgress
+                else do
+                    after <- getCurrentTime
+                    let timeTotal = round (diffUTCTime after before)
+                        (mins, secs) = timeTotal `quotRem` (60 :: Int)
+                        packagePerSecond =
+                            fromIntegral ((loadedPackageCount * 100) `div` timeTotal) / 100 :: Float
+                    logInfo $
+                        mconcat
+                            [ "Loading snapshot '"
+                            , display snapName
+                            , "' was done (in "
+                            , displayShow mins
+                            , "min "
+                            , displayShow secs
+                            , "sec). With average "
+                            , displayShow packagePerSecond
+                            , " packages/sec. There are still docs."
+                            ]
+    reportProgress
 
 -- | Uploads a json file to S3 with all latest snapshots per major lts version and one nightly.
 uploadSnapshotsJSON :: RIO StackageCron ()

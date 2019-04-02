@@ -142,59 +142,52 @@ runHoogleQuery :: (Route App -> Text)
                -> Hoogle.Database
                -> HoogleQueryInput
                -> HoogleQueryOutput
-runHoogleQuery renderUrl snapshot hoogledb HoogleQueryInput {..} =
-    HoogleQueryOutput targets mcount
+runHoogleQuery renderUrl snapshot hoogledb HoogleQueryInput {..} = HoogleQueryOutput targets mcount
   where
     allTargets = Hoogle.searchDatabase hoogledb query
-    targets = take (min 100 hqiLimitTo)
-            $ drop hqiOffsetBy
-            $ map fixResult allTargets
-    query = unpack $ hqiQueryInput ++ if hqiExact then " is:exact" else ""
-
+    targets = take (min 100 hqiLimitTo) $ drop hqiOffsetBy $ map fixResult allTargets
+    query =
+        unpack $
+        hqiQueryInput ++
+        if hqiExact
+            then " is:exact"
+            else ""
     mcount = limitedLength 0 allTargets
-
     limitedLength x [] = Just x
     limitedLength x (_:rest)
         | x >= 20 = Nothing
         | otherwise = limitedLength (x + 1) rest
-
-    fixResult target@(Hoogle.Target {..}) = HoogleResult
-        { hrURL     = case sources of
-                        [(_,[ModuleLink _ m])] -> m ++ haddockAnchorFromUrl targetURL
-                        _ -> fromMaybe targetURL $ asum
-                                [ moduleLink
-                                , packageLink
-                                ]
-        , hrSources = sources
-        , hrTitle   = -- FIXME find out why these replaces are necessary
-                      unpack $ T.replace "<0>" "" $ T.replace "</0>" "" $ pack
-                      targetItem
-        , hrBody    = targetDocs
-        }
-      where sources = toList $ do
-              (packageLink', mname, mkModuleLink) <- targetLinks renderUrl snapshot target
-              Just (packageLink', [ModuleLink mname $ mkModuleLink mname])
-
-            moduleLink = do
-              (_packageLink, mname, mkModuleLink) <- targetLinks renderUrl snapshot target
-              guard (mname == "module")
-              let doc = Text.HTML.DOM.parseLBS $ encodeUtf8 $ pack targetItem
-                  cursor = fromDocument doc
-                  item = T.concat $ cursor $// content
-              mkModuleLink . fromString . T.unpack <$> T.stripPrefix "module " item
-
-            packageLink = do
-              guard (isNothing targetPackage)
-              "package" <- Just targetType
-              let doc = Text.HTML.DOM.parseLBS $ encodeUtf8 $ pack targetItem
-                  cursor = fromDocument doc
-                  item = T.concat $ cursor $// content
-              pnameTxt <- T.stripPrefix "package " item
-              pname <- fromPathPiece pnameTxt
-              return $ T.unpack $ renderUrl $ SnapshotR snapshot $ StackageSdistR $ PNVName pname
-
-            haddockAnchorFromUrl =
-                ('#':) . reverse . takeWhile (/='#') . reverse
+    fixResult target@Hoogle.Target {..} =
+        HoogleResult
+            { hrURL =
+                  case sources of
+                      [(_, [ModuleLink _ m])] -> m ++ haddockAnchorFromUrl targetURL
+                      _ -> fromMaybe targetURL $ asum [moduleLink, packageLink]
+            , hrSources = sources
+            , hrTitle -- FIXME find out why these replaces are necessary
+               = unpack $ T.replace "<0>" "" $ T.replace "</0>" "" $ pack targetItem
+            , hrBody = targetDocs
+            }
+      where
+        sources =
+            toList $ do
+                (packageLink', mname, mkModuleLink) <- targetLinks renderUrl snapshot target
+                Just (packageLink', [ModuleLink mname $ mkModuleLink mname])
+        item =
+            let doc = Text.HTML.DOM.parseLBS $ encodeUtf8 $ pack targetItem
+                cursor = fromDocument doc
+             in T.concat $ cursor $// content
+        moduleLink = do
+            (_packageLink, mname, mkModuleLink) <- targetLinks renderUrl snapshot target
+            guard (mname == "module")
+            mkModuleLink . fromString . T.unpack <$> T.stripPrefix "module " item
+        packageLink = do
+            guard (isNothing targetPackage)
+            "package" <- Just targetType
+            pnameTxt <- T.stripPrefix "package " item
+            pname <- fromPathPiece pnameTxt
+            return $ T.unpack $ renderUrl $ SnapshotR snapshot $ StackageSdistR $ PNVName pname
+        haddockAnchorFromUrl = ('#' :) . reverse . takeWhile (/= '#') . reverse
 
 targetLinks ::
        (Route App -> Text)
