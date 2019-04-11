@@ -17,8 +17,7 @@ import Data.These
 import Data.Time (FormatTime)
 import Import
 import Stackage.Database
-import Stackage.Database.Types (ModuleListingInfo(..), PackageListingInfo(..),
-                                isLts)
+import Stackage.Database.Types (PackageListingInfo(..), isLts)
 import Stackage.Snapshot.Diff
 
 getStackageHomeR :: SnapName -> Handler TypedContent

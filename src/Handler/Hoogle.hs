@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -13,7 +14,6 @@ import Data.Text.Read (decimal)
 import qualified Hoogle
 import Import
 import Stackage.Database
-import Stackage.Database.Types (ModuleListingInfo(..))
 import Text.Blaze.Html (preEscapedToHtml)
 import qualified Text.HTML.DOM
 import Text.XML.Cursor (content, fromDocument, ($//))
@@ -78,22 +78,25 @@ getHoogleR name = track "Handler.Hoogle.getHoogleR" $ do
         $(widgetFile "hoogle")
 
 getHoogleDatabaseR :: SnapName -> Handler Html
-getHoogleDatabaseR name = track "Handler.Hoogle.getHoogleDatabaseR" $ do
-    mdatabasePath <- getHoogleDB name
-    case mdatabasePath of
-        Nothing   -> hoogleDatabaseNotAvailableFor name
-        Just path -> sendFile "application/octet-stream" path
+getHoogleDatabaseR name =
+    track "Handler.Hoogle.getHoogleDatabaseR" $ do
+        mdatabasePath <- getHoogleDB name
+        case mdatabasePath of
+            Nothing   -> hoogleDatabaseNotAvailableFor name
+            Just path -> sendFile "application/octet-stream" path
 
 hoogleDatabaseNotAvailableFor :: SnapName -> Handler a
-hoogleDatabaseNotAvailableFor name = track "Handler.Hoogle.hoogleDatabaseNotAvailableFor" $ do
-    (>>= sendResponse) $ defaultLayout $ do
-        setTitle "Hoogle database not available"
-        [whamlet|
+hoogleDatabaseNotAvailableFor name =
+    track "Handler.Hoogle.hoogleDatabaseNotAvailableFor" $ do
+        sendResponse =<<
+            defaultLayout
+                (do setTitle "Hoogle database not available"
+                    [whamlet|
             <div .container>
                 <p>The given Hoogle database is not available.
                 <p>
                     <a href=@{SnapshotR name StackageHomeR}>Return to snapshot homepage
-        |]
+        |])
 
 getPageCount :: Int -> Int
 getPageCount totalCount = 1 + div totalCount perPage
@@ -102,34 +105,34 @@ perPage :: Int
 perPage = 10
 
 data HoogleQueryInput = HoogleQueryInput
-    { hqiQueryInput :: Text
-    , hqiLimitTo    :: Int
-    , hqiOffsetBy   :: Int
-    , hqiExact      :: Bool
+    { hqiQueryInput :: !Text
+    , hqiLimitTo    :: !Int
+    , hqiOffsetBy   :: !Int
+    , hqiExact      :: !Bool
     }
     deriving (Eq, Read, Show, Data, Ord, Generic)
 
 data HoogleQueryOutput = HoogleQueryOutput [HoogleResult] (Maybe Int) -- ^ Int == total count
-    deriving (Read, Typeable, Data, Show, Eq, Generic)
+    deriving (Read, Typeable, Show, Eq, Generic)
 instance NFData HoogleQueryOutput
 
 data HoogleResult = HoogleResult
-    { hrURL     :: String
-    , hrSources :: [(PackageLink, [ModuleLink])]
-    , hrTitle   :: String -- ^ HTML
-    , hrBody    :: String -- ^ plain text
+    { hrURL     :: !Text
+    , hrSources :: ![(PackageLink, [ModuleLink])]
+    , hrTitle   :: !Text -- ^ HTML
+    , hrBody    :: !String -- ^ plain text
     }
-    deriving (Eq, Read, Show, Data, Ord, Generic)
+    deriving (Eq, Read, Show, Ord, Generic)
 
 data PackageLink = PackageLink
-    { plName :: String
-    , plURL  :: String
+    { plName :: !PackageNameP
+    , plURL  :: !Text
     }
-    deriving (Eq, Read, Show, Data, Ord, Generic)
+    deriving (Eq, Read, Show, Ord, Generic)
 
 data ModuleLink = ModuleLink
-    { mlName :: ModuleNameP
-    , mlURL  :: String
+    { mlName :: !ModuleNameP
+    , mlURL  :: !Text
     }
     deriving (Eq, Read, Show, Data, Ord, Generic)
 
@@ -161,47 +164,48 @@ runHoogleQuery renderUrl snapshot hoogledb HoogleQueryInput {..} = HoogleQueryOu
         HoogleResult
             { hrURL =
                   case sources of
-                      [(_, [ModuleLink _ m])] -> m ++ haddockAnchorFromUrl targetURL
-                      _ -> fromMaybe targetURL $ asum [moduleLink, packageLink]
+                      [(_, [ModuleLink _ m])] -> m <> haddockAnchorFromUrl targetURL
+                      _ -> fromMaybe (T.pack targetURL) $ asum [mModuleLink, mPackageLink]
             , hrSources = sources
-            , hrTitle -- FIXME find out why these replaces are necessary
-               = unpack $ T.replace "<0>" "" $ T.replace "</0>" "" $ pack targetItem
+            , hrTitle
+               -- NOTE: from hoogle documentation:
+               -- HTML span of the item, using 0 for the name and 1 onwards for arguments
+               = T.replace "<0>" "" $ T.replace "</0>" "" $ pack targetItem
             , hrBody = targetDocs
             }
       where
         sources =
             toList $ do
-                (packageLink', mname, mkModuleLink) <- targetLinks renderUrl snapshot target
-                Just (packageLink', [ModuleLink mname $ mkModuleLink mname])
+                (packageLink, mkModuleUrl) <- targetLinks renderUrl snapshot target
+                modName <- parseModuleNameP . fst =<< targetModule
+                Just (packageLink, [ModuleLink modName $ mkModuleUrl modName])
         item =
             let doc = Text.HTML.DOM.parseLBS $ encodeUtf8 $ pack targetItem
                 cursor = fromDocument doc
              in T.concat $ cursor $// content
-        moduleLink = do
-            (_packageLink, mname, mkModuleLink) <- targetLinks renderUrl snapshot target
-            guard (mname == "module")
-            mkModuleLink . fromString . T.unpack <$> T.stripPrefix "module " item
-        packageLink = do
-            guard (isNothing targetPackage)
+        mModuleLink = do
+            "module" <- Just targetType
+            (_packageLink, mkModuleUrl) <- targetLinks renderUrl snapshot target
+            modName <- parseModuleNameP . T.unpack =<< T.stripPrefix "module " item
+            pure $ mkModuleUrl modName
+        mPackageLink = do
+            guard $ isNothing targetPackage
             "package" <- Just targetType
             pnameTxt <- T.stripPrefix "package " item
             pname <- fromPathPiece pnameTxt
-            return $ T.unpack $ renderUrl $ SnapshotR snapshot $ StackageSdistR $ PNVName pname
-        haddockAnchorFromUrl = ('#' :) . reverse . takeWhile (/= '#') . reverse
+            return $ renderUrl $ SnapshotR snapshot $ StackageSdistR $ PNVName pname
+        haddockAnchorFromUrl = T.pack . ('#' :) . reverse . takeWhile (/= '#') . reverse
 
 targetLinks ::
        (Route App -> Text)
     -> SnapName
     -> Hoogle.Target
-    -> Maybe (PackageLink, ModuleNameP, ModuleNameP -> String)
-targetLinks renderUrl sname Hoogle.Target {..} = do
+    -> Maybe (PackageLink, ModuleNameP -> Text)
+targetLinks renderUrl snapName Hoogle.Target {..} = do
     (pname, _) <- targetPackage
-    (mname, _) <- targetModule
-    packageIdentifierP <- fromPathPiece $ T.pack pname
-    let mkMli modName = ModuleListingInfo modName packageIdentifierP
-        packageLink = PackageLink pname (makePackageLink pname)
-        mkModuleLink modName = T.unpack (renderUrl (haddockUrl sname (mkMli modName)))
-    return (packageLink, fromString mname, mkModuleLink)
+    packageName <- parsePackageNameP pname
+    let mkModuleUrl modName = renderUrl (hoogleHaddockUrl snapName packageName modName)
+    return (makePackageLink packageName, mkModuleUrl)
 
-makePackageLink :: String -> String
-makePackageLink pkg = "/package/" ++ pkg
+makePackageLink :: PackageNameP -> PackageLink
+makePackageLink packageName = PackageLink packageName ("/package/" <> toPathPiece packageName)

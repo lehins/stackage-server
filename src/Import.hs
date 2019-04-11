@@ -38,6 +38,9 @@ haddockUrl sname mli =
         sname
         [toPathPiece (mliPackageIdentifier mli), toPathPiece (mliModuleName mli) <> ".html"]
 
+hoogleHaddockUrl :: SnapName -> PackageNameP -> ModuleNameP -> Route App
+hoogleHaddockUrl sname pname mname = HaddockR sname [toPathPiece pname, toPathPiece mname <> ".html"]
+
 track
     :: MonadIO m
     => String -> m a -> m a

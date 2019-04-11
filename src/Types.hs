@@ -16,6 +16,7 @@ module Types
     , snapshotPrettyName
     , snapshotPrettyNameShort
     , PackageNameP(..)
+    , parsePackageNameP
     , VersionP(..)
     , Revision(..)
     , VersionRev(..)
@@ -24,6 +25,7 @@ module Types
     , FlagNameP(..)
     , PackageVersionRev(..)
     , ModuleNameP(..)
+    , parseModuleNameP
     , SafeFilePath
     , moduleNameFromComponents
     , PackageIdentifierP(..)
@@ -201,8 +203,11 @@ instance Hashable PackageNameP where
 instance ToBuilder PackageNameP Builder where
     toBuilder = getUtf8Builder . display
 
+parsePackageNameP :: String -> Maybe PackageNameP
+parsePackageNameP = fmap PackageNameP . parsePackageName
+
 instance PathPiece PackageNameP where
-    fromPathPiece = fmap PackageNameP . parsePackageName . T.unpack
+    fromPathPiece = parsePackageNameP . T.unpack
     toPathPiece = textDisplay
 instance ToMarkup PackageNameP where
     toMarkup = toMarkup . packageNameString . unPackageNameP
@@ -426,12 +431,13 @@ instance PathPiece ModuleNameP where
     toPathPiece (ModuleNameP moduleName) = T.intercalate "-" $ map T.pack $ DT.components moduleName
     fromPathPiece moduleNameDashes = do
         (moduleNameDashesNoDot, "") <- Just $ T.break (== '.') moduleNameDashes
-      -- \ make sure there are no dots in the module components
+        -- \ make sure there are no dots in the module components
         let moduleComponents = T.unpack <$> T.split (== '-') moduleNameDashesNoDot
         guard (all DT.validModuleComponent moduleComponents)
         pure $ ModuleNameP $ DT.fromComponents moduleComponents
 
-
+parseModuleNameP :: String -> Maybe ModuleNameP
+parseModuleNameP = fmap ModuleNameP . DT.simpleParse
 
 newtype FlagNameP = FlagNameP
     { unFlagNameP :: FlagName

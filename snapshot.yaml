@@ -2,7 +2,7 @@ resolver: lts-12.26
 name: stackage-server-snapshot
 packages:
 - git: https://github.com/lehins/stack
-  commit: c8e8a3b2b7136d8b2d8b8341a9ba80dde9e661c2
+  commit: 318afb036c7ac941ea3ce452ef17cfb03c0f984d
   subdirs:
   - subs/pantry
 - Cabal-2.4.0.1@rev:0
