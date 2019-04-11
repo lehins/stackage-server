@@ -328,7 +328,7 @@ addPantryPackage sid compiler isHidden flags (PantryPackage pc treeKey) = do
         Just (hcid, mtid) -> run $ storeHackageSnapshotPackage hcid mtid Nothing
     readIORef hasAddedPackageRef
   where
-    pid = PackageIdentifierP (pcPackageName pc) (pcPackageVersion pc)
+    pid = PackageIdentifierP (pcPackageName pc) (pcVersion pc)
 
 
 

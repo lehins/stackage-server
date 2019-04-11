@@ -58,6 +58,7 @@ import RIO
 import RIO.Process (HasProcessContext(..), ProcessContext)
 import RIO.Time (Day)
 import Stackage.Database.Schema
+import Text.Blaze (ToMarkup(..))
 import Types
 
 haddockBucketName :: Text
@@ -109,15 +110,18 @@ data SnapshotFile = SnapshotFile
 
 
 data PantryCabal = PantryCabal
-    { pcPackageName    :: !PackageNameP
-    , pcPackageVersion :: !VersionP
-    , pcCabalKey       :: !BlobKey
+    { pcPackageName :: !PackageNameP
+    , pcVersion     :: !VersionP
+    , pcCabalKey    :: !BlobKey
     } deriving (Show)
 
 instance Display PantryCabal where
     display PantryCabal {..} =
-        display (PackageIdentifierP pcPackageName pcPackageVersion) <> "@sha256:" <>
+        display (PackageIdentifierP pcPackageName pcVersion) <> "@sha256:" <>
         display pcCabalKey
+
+instance ToMarkup PantryCabal where
+    toMarkup = toMarkup . textDisplay
 
 data PantryPackage = PantryPackage
     { ppPantryCabal :: !PantryCabal
@@ -128,7 +132,7 @@ toPackageIdentifierRevision :: PantryCabal -> PackageIdentifierRevision
 toPackageIdentifierRevision PantryCabal {..} =
     PackageIdentifierRevision
         (unPackageNameP pcPackageName)
-        (unVersionP pcPackageVersion)
+        (unVersionP pcVersion)
         (CFIHash sha (Just size))
   where
     BlobKey sha size = pcCabalKey
@@ -147,13 +151,13 @@ instance FromJSON PantryCabal where
                 (hashTxtWithAlgo, sizeWithComma) = T.break (== ',') hashWithSize
             -- Split package identifier foo-bar-0.1.2 into package name and version
             (pkgNameTxt, pkgVersionTxt) <-
-                case T.breakOnEnd ("-") packageTxt of
+                case T.breakOnEnd "-" packageTxt of
                     (pkgNameWithDashEnd, pkgVersionTxt)
                         | Just pkgName <- T.stripSuffix "-" pkgNameWithDashEnd ->
                             return (pkgName, pkgVersionTxt)
                     _ -> fail $ "Invalid package identifier format: " ++ T.unpack packageTxt
             pcPackageName <- parseJSON $ String pkgNameTxt
-            pcPackageVersion <- parseJSON $ String pkgVersionTxt
+            pcVersion <- parseJSON $ String pkgVersionTxt
             hashTxt <-
                 maybe (fail $ "Unrecognized hashing algorithm: " ++ T.unpack hashTxtWithAlgo) pure $
                 T.stripPrefix "@sha256:" hashTxtWithAlgo
@@ -238,6 +242,7 @@ data SnapshotPackagePageInfo = SnapshotPackagePageInfo
     , sppiReverseDepsCount       :: !Int
     , sppiLatestInfo             :: ![LatestInfo]
     , sppiModuleNames            :: ![ModuleNameP]
+    , sppiPantryCabal            :: !(Maybe PantryCabal)
     , sppiVersion                :: !(Maybe VersionRev)
     -- ^ Version on this page. Should be present only if different from latest
     }

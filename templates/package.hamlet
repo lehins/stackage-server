@@ -78,32 +78,36 @@ $newline never
                                       #{name}
                               $of _
 
-           <div .maintainer>
-               $if not (null maintainers)
-                    Maintained by #
-                    $forall (i,identity) <- maintainers
-                         <strong .author>
-                             $case identity
-                                $of PlainText name
-                                    $if i /= 0
-                                        , #
-                                    #{name}
-                                $of Contact name email
-                                    $if i /= 0
-                                        , #
-                                    <a href="mailto:#{renderEmail email}">
-                                        #{name}
-                                $of EmailOnly email
-                                    $if i /= 0
-                                        , #
-                                    <a href="mailto:#{renderEmail email}">
-                                        #{renderEmail email}
+            <div .maintainer>
+                $if not (null maintainers)
+                     Maintained by #
+                     $forall (i,identity) <- maintainers
+                          <strong .author>
+                              $case identity
+                                 $of PlainText name
+                                     $if i /= 0
+                                         , #
+                                     #{name}
+                                 $of Contact name email
+                                     $if i /= 0
+                                         , #
+                                     <a href="mailto:#{renderEmail email}">
+                                         #{name}
+                                 $of EmailOnly email
+                                     $if i /= 0
+                                         , #
+                                     <a href="mailto:#{renderEmail email}">
+                                         #{renderEmail email}
 
             $maybe sppi <- msppi
                 $with spi <- sppiSnapshotPackageInfo sppi
                     <div .docs>
                         <h4>
                             Module documentation for #{spiVersion spi}
+                        $maybe pantryCabal <- sppiPantryCabal sppi
+                            <div .pantry-version>
+                                This version can be pinned in stack with:
+                                <code>#{pantryCabal}
                         $if null (sppiModuleNames sppi)
                             <p>There are no documented modules for this package.
                         $else

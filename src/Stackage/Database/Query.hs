@@ -1,6 +1,6 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TupleSections #-}
 module Stackage.Database.Query
     (
@@ -73,8 +73,8 @@ import Database.Esqueleto.Internal.Language (FromPreprocess)
 import Database.Esqueleto.Internal.Sql
 import qualified Database.Persist as P
 import Pantry.Storage (EntityField(..), PackageName, Unique(..), Version,
-                       getPackageNameById, getPackageNameId, getTreeForKey,
-                       getVersionId, loadBlobById, treeCabal)
+                       getBlobKey, getPackageNameById, getPackageNameId,
+                       getTreeForKey, getVersionId, loadBlobById, treeCabal)
 import Pantry.Types (mkSafeFilePath)
 import RIO hiding (on, (^.))
 import qualified RIO.Map as Map
@@ -443,7 +443,7 @@ getSnapshotPackagePageInfo spi maxDisplayedDeps =
         mhciLatest <-
             case spiOrigin spi of
                 Hackage -> getHackageLatestVersion $ spiPackageName spi
-                _       -> pure Nothing
+                _ -> pure Nothing
         forwardDepsCount <- getForwardDepsCount spi
         reverseDepsCount <- getReverseDepsCount spi
         forwardDeps <-
@@ -456,6 +456,7 @@ getSnapshotPackagePageInfo spi maxDisplayedDeps =
                 else pure []
         latestInfo <- getLatests (spiPackageName spi)
         moduleNames <- getModuleNames (spiSnapshotPackageId spi)
+        mcabalBlobKey <- traverse getBlobKey $ spiCabalBlobId spi
         pure
             SnapshotPackagePageInfo
                 { sppiSnapshotPackageInfo = spi
@@ -466,6 +467,13 @@ getSnapshotPackagePageInfo spi maxDisplayedDeps =
                 , sppiReverseDepsCount = reverseDepsCount
                 , sppiLatestInfo = latestInfo
                 , sppiModuleNames = moduleNames
+                , sppiPantryCabal =
+                      mcabalBlobKey RIO.<&> \cabalBlobKey ->
+                          PantryCabal
+                              { pcPackageName = spiPackageName spi
+                              , pcVersion = spiVersion spi
+                              , pcCabalKey = cabalBlobKey
+                              }
                 , sppiVersion =
                       listToMaybe
                           [ spiVersionRev spi

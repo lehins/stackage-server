@@ -99,13 +99,6 @@ handlePackage epi = do
                 return (Just sppi, sppiLatestHackageCabalInfo sppi)
             Left hci -> pure (Nothing, Just hci)
     PackageInfo {..} <- getPackageInfo epi
-    -- let (mPackageDepsLink, packageRevDepsLink) =
-    --       case msppi of
-    --         case mSnapName of
-    --             Nothing -> (PackageDepsR pname, PackageRevDepsR pname)
-    --             Just snap ->
-    --                 let
-    --                  in (wrap SnapshotPackageDepsR, wrap SnapshotPackageRevDepsR)
     let authors = enumerate piAuthors
         maintainers =
             let ms = enumerate piMaintainers
