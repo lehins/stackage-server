@@ -86,17 +86,16 @@ packagePage mspi pname =
 
 handlePackage :: Either HackageCabalInfo SnapshotPackageInfo -> Handler Html
 handlePackage epi = do
-    (isDeprecated, inFavourOf, snapInfo, PackageInfo{..}) <- do
-        (isDeprecated, inFavourOf) <- run $ getDeprecatedQuery pname
-        snapInfo <- case epi of
-          Right spi -> Right <$> timeout 2000000 (run $ getSnapshotPackagePageInfoQuery spi maxDisplayedDeps)
+    (isDeprecated, inFavourOf, snapInfo, PackageInfo{..}) <- run $ do
+        (isDeprecated, inFavourOf) <- getDeprecatedQuery pname
+        snapInfo <- case epi of 
+          Right spi -> Right <$> getSnapshotPackagePageInfoQuery spi maxDisplayedDeps
           Left hci -> pure $ Left hci
-        pinfo <- run $ getPackageInfoQuery epi
+        pinfo <- getPackageInfoQuery epi
         pure (isDeprecated, inFavourOf, snapInfo, pinfo)
     (msppi, mhciLatest) <- case snapInfo of
                              Left hci -> pure (Nothing, Just hci)
-                             Right (Just sppi) -> pure (Just sppi, sppiLatestHackageCabalInfo sppi)
-                             Right Nothing -> pure (Nothing, Nothing)
+                             Right sppi -> pure (Just sppi, sppiLatestHackageCabalInfo sppi)
     let authors = enumerate piAuthors
         maintainers =
             let ms = enumerate piMaintainers
