@@ -21,7 +21,7 @@ getBranchFeedR = track "Handler.Feed.getBranchFeedR" . getBranchFeed . Just
 
 getBranchFeed :: Maybe SnapshotBranch -> Handler TypedContent
 getBranchFeed mBranch = do
-  cacheSeconds 3600
+  -- cacheSeconds 3600
   mkFeed mBranch =<< getSnapshots mBranch 20 0
 
 mkFeed :: Maybe SnapshotBranch -> [Entity Snapshot] -> Handler TypedContent

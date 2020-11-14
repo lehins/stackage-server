@@ -22,7 +22,7 @@ import Text.Blaze
 getStackageHomeR :: SnapName -> Handler TypedContent
 getStackageHomeR name =
     track "Handler.StackageHome.getStackageHomeR" $ do
-        cacheSeconds $ 60 * 60 * 12
+        -- cacheSeconds $ 60 * 60 * 12
         Entity sid snapshot <- lookupSnapshot name >>= maybe notFound return
         previousSnapName <- fromMaybe name . map snd <$> snapshotBefore (snapshotName snapshot)
         let hoogleForm =
@@ -52,7 +52,7 @@ instance ToJSON SnapshotInfo where
 
 getStackageDiffR :: SnapName -> SnapName -> Handler TypedContent
 getStackageDiffR name1 name2 = track "Handler.StackageHome.getStackageDiffR" $ do
-    cacheSeconds $ 60 * 60 * 48
+    -- cacheSeconds $ 60 * 60 * 48
     Entity sid1 _ <- lookupSnapshot name1 >>= maybe notFound return
     Entity sid2 _ <- lookupSnapshot name2 >>= maybe notFound return
     snapDiff <- getSnapshotDiff sid1 sid2
@@ -65,7 +65,7 @@ getStackageDiffR name1 name2 = track "Handler.StackageHome.getStackageDiffR" $ d
 
 getStackageCabalConfigR :: SnapName -> Handler TypedContent
 getStackageCabalConfigR name = track "Handler.StackageHome.getStackageCabalConfigR" $ do
-    cacheSeconds $ 60 * 60 * 48
+    -- cacheSeconds $ 60 * 60 * 48
     Entity sid _ <- lookupSnapshot name >>= maybe notFound return
     render <- getUrlRender
 
@@ -164,7 +164,7 @@ getDocsR _name = do
                    "<a href=\"https://github.com/fpco/stackage-server/issues/300\">" <>
                    "github:fpco/stackage-server#300</a>")))
   -- track "Handler.StackageHome.getDocsR" $ do
-  --   cacheSeconds $ 60 * 60 * 48
+  --   -- cacheSeconds $ 60 * 60 * 48
   --   Entity sid _ <- lookupSnapshot name >>= maybe notFound return
   --   mlis <- getSnapshotModules sid
   --   render <- getUrlRender

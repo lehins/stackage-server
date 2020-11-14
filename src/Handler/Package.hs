@@ -36,7 +36,7 @@ getPackageR = track "Handler.Package.getPackageR" . packagePage Nothing
 
 getPackageBadgeR :: PackageNameP -> SnapshotBranch -> Handler TypedContent
 getPackageBadgeR pname branch = track "Handler.Package.getPackageBadgeR" $ do
-    cacheSeconds (3 * 60 * 60)
+    -- cacheSeconds (3 * 60 * 60)
     snapName     <- maybe notFound pure =<< newestSnapshot branch
     Entity sid _ <- maybe notFound pure =<< lookupSnapshot snapName
     mVersion <- getPackageVersionForSnapshot sid pname
@@ -150,7 +150,7 @@ handlePackage epi = do
 getPackageSnapshotsR :: PackageNameP -> Handler Html
 getPackageSnapshotsR pn =
     track "Handler.Package.getPackageSnapshotsR" $ do
-        cacheSeconds $ 60 * 60 * 24
+        -- cacheSeconds $ 60 * 60 * 24
         snapshots <- getSnapshotsForPackage pn Nothing
         defaultLayout
             (do setTitle ("Packages for " >> toHtml pn)

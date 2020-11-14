@@ -28,7 +28,7 @@ getHealthzR = return "This should never be used, we should use the middleware in
 -- inclined, or create a single monolithic file.
 getHomeR :: Handler Html
 getHomeR = track "Handler.Snapshots.getAllSnapshotsR" $ do
-    cacheSeconds $ 60 * 60
+    -- cacheSeconds $ 60 * 60
     now' <- getCurrentTime
     (map entityVal -> nightly) <-
         getSnapshots (Just  NightlyBranch) 1 0

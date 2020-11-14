@@ -13,7 +13,7 @@ import Stackage.Database
 
 getPackageDepsR :: PackageNameP -> Handler Html
 getPackageDepsR pname = do
-    cacheSeconds $ 60 * 60
+    -- cacheSeconds $ 60 * 60
     mspi <- getSnapshotPackageLatestVersion pname
     case mspi of
         Nothing -> redirect $ PackageR pname
@@ -21,7 +21,7 @@ getPackageDepsR pname = do
 
 getSnapshotPackageDepsR :: SnapName -> PackageNameVersion -> Handler Html
 getSnapshotPackageDepsR snapName pnv = do
-    cacheSeconds $ 60 * 60
+    -- cacheSeconds $ 60 * 60
     pnvToSnapshotPackageInfo snapName pnv (\_ _ -> notFound) $ \isSameVersion spi ->
         if isSameVersion
             then helper Deps spi
@@ -31,7 +31,7 @@ getSnapshotPackageDepsR snapName pnv = do
 
 getPackageRevDepsR :: PackageNameP -> Handler Html
 getPackageRevDepsR pname = do
-    cacheSeconds $ 60 * 60
+    -- cacheSeconds $ 60 * 60
     mspi <- getSnapshotPackageLatestVersion pname
     case mspi of
         Nothing -> redirect $ PackageR pname
@@ -39,7 +39,7 @@ getPackageRevDepsR pname = do
 
 getSnapshotPackageRevDepsR :: SnapName -> PackageNameVersion -> Handler Html
 getSnapshotPackageRevDepsR snapName pnv = do
-    cacheSeconds $ 60 * 60
+    -- cacheSeconds $ 60 * 60
     pnvToSnapshotPackageInfo snapName pnv (\_ _ -> notFound) $ \isSameVersion spi ->
         if isSameVersion
             then helper RevDeps spi
