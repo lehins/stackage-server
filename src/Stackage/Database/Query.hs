@@ -616,7 +616,7 @@ getSnapshotPackageLatestVersionQuery ::
        PackageNameP -> ReaderT SqlBackend (RIO env) (Maybe SnapshotPackageInfo)
 getSnapshotPackageLatestVersionQuery pname =
     fmap snd . listToMaybe <$>
-    (snapshotPackageInfoQuery $ \_sp s pn v spiQ -> do
+    (snapshotPackageInfoQuery $ \_sp s pn v spiQ -> distinctOn [don (versionArray v)] $ do
          where_ (pn ^. PackageNameName ==. val pname)
          orderBy [desc (versionArray v), desc (s ^. SnapshotCreated)]
          limit 1
